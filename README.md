@@ -6,7 +6,7 @@ Built for running many Claude Code sessions in parallel (one project per tmux se
 
 ```
 ╭─ claude-dash · live sessions ─────────────────────────────────╮
-│ ? wait   > busy   . idle   $ shell                            │
+│ ? wait   > busy   & bg-shell   . idle                         │
 │ sort: [s]tatus  [c]tx%  [t]ime  [p]roj  ·  r=refresh  Enter=jump│
 │ STAT  CTX%  PROJECT               TARGET             LAST      │
 │ ▶ ?    41%   homelab-fixes         homelab:1.1        2m       │
@@ -32,7 +32,7 @@ cd claude-tmux-dashboard
 | Key | Action |
 |-----|--------|
 | `Enter` | Jump to that session's tmux pane |
-| `s` | Sort by status (default: waiting → busy → idle → shell, recent first within each) |
+| `s` | Sort by status (default: waiting → busy → bg-shell → idle, recent first within each) |
 | `c` | Sort by context % (fullest first) |
 | `t` | Sort by last activity (most recent first) |
 | `p` | Sort by project name (A–Z) |
@@ -45,8 +45,8 @@ Because `s`/`c`/`t`/`p` are sort keys they don't type-to-filter the fzf query �
 - **STAT** — live status read straight from each session's state file:
   - `?` **waiting** on you (input / permission prompt)
   - `>` busy (Claude working)
+  - `&` bg-shell — live session with a background shell running (Claude reports `status: "shell"` whenever a session has ≥1 background shell)
   - `.` idle
-  - `$` shell (session parked at a shell, no live Claude)
 - **CTX%** — context-window fill, from the transcript's last token-usage record. Window-aware (÷200k, or ÷1M for 1M-window sessions), capped at 99%.
 - **TARGET** — the tmux `session:window.pane` it lives in.
 - **LAST** — time since last activity.

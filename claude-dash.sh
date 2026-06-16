@@ -131,8 +131,8 @@ enumerate_sessions() {
     case "$sess_status" in
       waiting) glyph="?" ; sortkey=0 ; gcolor=$'\033[1;31m' ;;  # bold red
       busy)    glyph=">" ; sortkey=1 ; gcolor=$'\033[1;33m' ;;  # bold yellow
-      idle)    glyph="." ; sortkey=2 ; gcolor=$'\033[2;37m' ;;  # dim
-      shell)   glyph='$' ; sortkey=3 ; gcolor=$'\033[1;34m' ;;  # bold blue
+      shell)   glyph="&" ; sortkey=2 ; gcolor=$'\033[1;36m' ;;  # cyan — live, has a background shell
+      idle)    glyph="." ; sortkey=3 ; gcolor=$'\033[2;37m' ;;  # dim
       *)       glyph="?" ; sortkey=4 ; gcolor=$'\033[0m'    ;;
     esac
     local glyph_disp="${gcolor}${glyph}"$'\033[0m'
@@ -187,8 +187,8 @@ preview_session() {
   case "$sortkey" in
     0) status_word="waiting" ; glyph_plain="?" ;;
     1) status_word="busy"    ; glyph_plain=">" ;;
-    2) status_word="idle"    ; glyph_plain="." ;;
-    3) status_word="shell"   ; glyph_plain='$' ;;
+    2) status_word="bg-shell (live, has a background shell)" ; glyph_plain="&" ;;
+    3) status_word="idle"    ; glyph_plain="." ;;
     *) status_word="unknown" ; glyph_plain="?" ;;
   esac
 
@@ -249,7 +249,7 @@ sel=$(
         --pointer='▶' \
         --prompt='filter ▸ ' \
         --info=inline \
-        --header=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[2;37m.\033[0m idle   \033[1;34m$\033[0m shell\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    r=refresh    Enter=jump\n\033[2mSTAT  CTX%  PROJECT               TARGET             LAST\033[0m' \
+        --header=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    r=refresh    Enter=jump\n\033[2mSTAT  CTX%  PROJECT               TARGET             LAST\033[0m' \
         --preview="\"$SCRIPT_PATH\" --preview {}" \
         --preview-window=right:45%:wrap:border-left \
         --bind "r:reload(\"$SCRIPT_PATH\" --list status)" \
