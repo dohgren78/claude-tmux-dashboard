@@ -7,6 +7,7 @@ set -euo pipefail
 
 SESSIONS_DIR="$HOME/.claude/sessions"
 PROJECTS_DIR="$HOME/.claude/projects"
+NAMES_FILE="$HOME/.claude/.claude-dash-slept"   # sessionId<TAB>tmux-name, written on sleep
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -160,8 +161,13 @@ enumerate_sessions() {
     local proj="${cwd:-unknown}"
     proj="${proj##*/}"
 
-    # Row: GLYPH<TAB>CTX%<TAB>PROJECT<TAB>TARGET<TAB>LASTACT<TAB>SORTKEY<TAB>JUMP<TAB>WAITINGFOR<TAB>PID<TAB>CWD<TAB>SID<TAB>ACTEPOCH
-    row="${glyph_disp}	${ctx_pct}	${proj}	${tmux_target}	${act_str}	${sortkey}	${jump_target}	${waiting_for}	${pid}	${cwd}	${sid}	${act_epoch}"
+    # Padded display column (field 13). ANSI lives only in the glyph, so the
+    # plain columns pad to fixed widths and actually line up. fzf shows field 13.
+    local disp
+    printf -v disp '%-4s %-20.20s %-20.20s %-4s' "$ctx_pct" "$proj" "$tmux_target" "$act_str"
+
+    # Data fields 1-12 (sort/jump/preview, unchanged) + display field 13
+    row="${glyph_disp}	${ctx_pct}	${proj}	${tmux_target}	${act_str}	${sortkey}	${jump_target}	${waiting_for}	${pid}	${cwd}	${sid}	${act_epoch}	${glyph_disp} ${disp}"
     rows="${rows}${row}
 "
   done
@@ -170,7 +176,7 @@ enumerate_sessions() {
   # session is NOT currently live. Keyed by EXACT sessionId so resume targets the
   # precise conversation — never "most recent in the cwd" (which grabbed the wrong
   # or a live session). Capped to the recent dozen; older ones via `claude --resume`.
-  local dcount=0 dmt tf dsid dcwd dname dact
+  local dcount=0 dmt tf dsid dcwd dname dact zdisp
   while IFS=$'\t' read -r dmt tf; do
     [[ -n "$tf" ]] || continue
     dsid=$(basename "$tf" .jsonl)
@@ -179,8 +185,11 @@ enumerate_sessions() {
     dcwd=$(grep -m1 -o '"cwd":"[^"]*"' "$tf" 2>/dev/null | sed 's/.*"cwd":"//; s/"$//')
     [[ -n "$dcwd" ]] || continue
     dact=$(elapsed_human "$dmt" 2>/dev/null || echo "-")
-    dname="${dcwd##*/}"
-    rows="${rows}"$'\033[2;37mz\033[0m'"	-	${dname}	(resume)	${dact}	5	RESUME|${dsid}|${dcwd}	-	-	${dcwd}	${dsid}	${dmt}
+    # Prefer the original tmux name recorded at sleep; else fall back to cwd basename
+    dname=$(grep -F "${dsid}"$'\t' "$NAMES_FILE" 2>/dev/null | tail -1 | cut -f2 || true)
+    [[ -n "$dname" ]] || dname="${dcwd##*/}"
+    printf -v zdisp '%-4s %-20.20s %-20.20s %-4s' "-" "$dname" "(resume)" "$dact"
+    rows="${rows}"$'\033[2;37mz\033[0m'"	-	${dname}	(resume)	${dact}	5	RESUME|${dsid}|${dcwd}	-	-	${dcwd}	${dsid}	${dmt}	"$'\033[2;37mz\033[0m'" ${zdisp}
 "
     dcount=$((dcount+1)); [[ $dcount -ge 12 ]] && break
   done < <(find "$PROJECTS_DIR" -name '*.jsonl' -mtime -14 -print0 2>/dev/null | xargs -0 stat -f '%m	%N' 2>/dev/null | sort -rn)
@@ -243,7 +252,7 @@ preview_session() {
 # No-op (with an explanatory label) on dormant rows, unmapped rows, and on the
 # session the dashboard itself is attached to.
 kill_session() {
-  local line="$1" jump sess cur
+  local line="$1" jump sess cur sid name
   jump=$(printf '%s' "$line" | cut -f7)
   if [[ "$jump" == RESUME\|* ]]; then printf ' z row — press Enter to resume (x only sleeps live) '; return 0; fi
   if [[ "$jump" == "-" || -z "$jump" ]]; then printf ' no tmux pane — nothing to sleep '; return 0; fi
@@ -251,7 +260,12 @@ kill_session() {
   [[ -z "$sess" ]] && { printf ' nothing to sleep '; return 0; }
   cur=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
   if [[ -n "$cur" && "$sess" == "$cur" ]]; then printf ' cannot sleep the current session (%s) ' "$sess"; return 0; fi
-  if tmux kill-session -t "$sess" 2>/dev/null; then printf ' slept: %s (now a z row) ' "$sess"; else printf ' could not sleep %s ' "$sess"; fi
+  if tmux kill-session -t "$sess" 2>/dev/null; then
+    # Record sessionId -> tmux name so resume restores the original name
+    sid=$(printf '%s' "$line" | cut -f11)
+    [[ -n "$sid" ]] && printf '%s\t%s\n' "$sid" "$sess" >> "$NAMES_FILE" 2>/dev/null
+    printf ' slept: %s (now a z row) ' "$sess"
+  else printf ' could not sleep %s ' "$sess"; fi
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -276,6 +290,10 @@ fi
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
+# Column header padded to the same widths as the display field (see enumerate).
+printf -v COLHDR '%-2s%-4s %-20s %-20s %s' '' 'CTX%' 'PROJECT' 'TARGET' 'LAST'
+HEADER=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    [x]=sleep  r=refresh  Enter=jump/resume\n'$'\033[2m'"${COLHDR}"$'\033[0m'
+
 # fzf pipeline — Enter accepts and returns the selected line; jump happens
 # AFTER fzf exits / the popup closes (switch-client inside an open popup is flaky).
 sel=$(
@@ -285,7 +303,8 @@ sel=$(
         --layout=reverse \
         --no-sort \
         --delimiter=$'\t' \
-        --with-nth=1,2,3,4,5 \
+        --with-nth=13 \
+        --nth=13 \
         --border=rounded \
         --border-label=' claude-dash · sessions ' \
         --border-label-pos=2 \
@@ -293,7 +312,7 @@ sel=$(
         --pointer='▶' \
         --prompt='filter ▸ ' \
         --info=inline \
-        --header=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    [x]=sleep  r=refresh  Enter=jump/resume\n\033[2mSTAT  CTX%  PROJECT               TARGET             LAST\033[0m' \
+        --header="$HEADER" \
         --preview="\"$SCRIPT_PATH\" --preview {}" \
         --preview-window=right:45%:wrap:border-left \
         --bind "r:reload(\"$SCRIPT_PATH\" --list status)" \
@@ -312,7 +331,8 @@ jump=$(printf '%s' "$sel" | cut -f7)
 # fresh tmux session at its cwd. Never --continue (which grabs the cwd's most-recent).
 if [[ "$jump" == RESUME\|* ]]; then
   IFS='|' read -r _ r_sid r_cwd <<< "$jump"
-  r_name=$(basename "$r_cwd")
+  r_name=$(printf '%s' "$sel" | cut -f3)   # PROJECT col = original tmux name (if recorded) else cwd basename
+  [[ -n "$r_name" ]] || r_name="${r_cwd##*/}"
   if tmux has-session -t "$r_name" 2>/dev/null; then r_name="${r_name}-${r_sid:0:6}"; fi
   tmux new-session -d -s "$r_name" -c "$r_cwd" -n claude
   tmux send-keys -t "$r_name:claude" "claude --resume $r_sid" C-m
