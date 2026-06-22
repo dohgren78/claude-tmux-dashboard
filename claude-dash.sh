@@ -13,7 +13,7 @@ PROJECTS_DIR="$HOME/.claude/projects"
 # Human-friendly elapsed time from epoch seconds.
 elapsed_human() {
   local now delta
-  now=$(date +%s)
+  now=${_NOW:-$(date +%s)}   # _NOW cached once per enumerate to avoid ~30 date spawns
   delta=$(( now - $1 ))
   if   (( delta < 60 ));    then echo "${delta}s"
   elif (( delta < 3600 ));  then echo "$(( delta / 60 ))m"
@@ -93,6 +93,7 @@ fi
 enumerate_sessions() {
   local mode="${1:-status}"
   local rows="" row live_sids=""
+  _NOW=$(date +%s)
   shopt -s nullglob
 
   for f in "$SESSIONS_DIR"/*.json; do
@@ -155,9 +156,9 @@ enumerate_sessions() {
     act_str=$(elapsed_human "$act_epoch" || true)
     act_str="${act_str:-?}"
 
-    # Project basename
-    local proj
-    proj=$(basename "${cwd:-unknown}")
+    # Project basename (parameter expansion — no subshell)
+    local proj="${cwd:-unknown}"
+    proj="${proj##*/}"
 
     # Row: GLYPH<TAB>CTX%<TAB>PROJECT<TAB>TARGET<TAB>LASTACT<TAB>SORTKEY<TAB>JUMP<TAB>WAITINGFOR<TAB>PID<TAB>CWD<TAB>SID<TAB>ACTEPOCH
     row="${glyph_disp}	${ctx_pct}	${proj}	${tmux_target}	${act_str}	${sortkey}	${jump_target}	${waiting_for}	${pid}	${cwd}	${sid}	${act_epoch}"
@@ -178,7 +179,7 @@ enumerate_sessions() {
     dcwd=$(grep -m1 -o '"cwd":"[^"]*"' "$tf" 2>/dev/null | sed 's/.*"cwd":"//; s/"$//')
     [[ -n "$dcwd" ]] || continue
     dact=$(elapsed_human "$dmt" 2>/dev/null || echo "-")
-    dname=$(basename "$dcwd")
+    dname="${dcwd##*/}"
     rows="${rows}"$'\033[2;37mz\033[0m'"	-	${dname}	(resume)	${dact}	5	RESUME|${dsid}|${dcwd}	-	-	${dcwd}	${dsid}	${dmt}
 "
     dcount=$((dcount+1)); [[ $dcount -ge 12 ]] && break
@@ -238,16 +239,19 @@ preview_session() {
 
 # Sleep/quit a live session: kill its tmux session (frees the RAM; the
 # conversation persists and reappears as a dormant 'z' row, resumable).
-# No-op on dormant rows and on the session the dashboard itself is attached to.
+# Prints a one-line status used as the fzf border label (instant feedback).
+# No-op (with an explanatory label) on dormant rows, unmapped rows, and on the
+# session the dashboard itself is attached to.
 kill_session() {
   local line="$1" jump sess cur
   jump=$(printf '%s' "$line" | cut -f7)
-  [[ "$jump" == RESUME\|* || "$jump" == "-" || -z "$jump" ]] && return 0
+  if [[ "$jump" == RESUME\|* ]]; then printf ' z row — press Enter to resume (x only sleeps live) '; return 0; fi
+  if [[ "$jump" == "-" || -z "$jump" ]]; then printf ' no tmux pane — nothing to sleep '; return 0; fi
   IFS='|' read -r sess _ _ <<< "$jump"
-  [[ -z "$sess" ]] && return 0
+  [[ -z "$sess" ]] && { printf ' nothing to sleep '; return 0; }
   cur=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
-  [[ "$sess" == "$cur" ]] && return 0   # never kill our own session
-  tmux kill-session -t "$sess" 2>/dev/null || true
+  if [[ -n "$cur" && "$sess" == "$cur" ]]; then printf ' cannot sleep the current session (%s) ' "$sess"; return 0; fi
+  if tmux kill-session -t "$sess" 2>/dev/null; then printf ' slept: %s (now a z row) ' "$sess"; else printf ' could not sleep %s ' "$sess"; fi
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -297,7 +301,7 @@ sel=$(
         --bind "c:reload(\"$SCRIPT_PATH\" --list ctx)" \
         --bind "t:reload(\"$SCRIPT_PATH\" --list activity)" \
         --bind "p:reload(\"$SCRIPT_PATH\" --list project)" \
-        --bind "x:execute-silent(\"$SCRIPT_PATH\" --kill {})+reload(\"$SCRIPT_PATH\" --list status)"
+        --bind "x:transform-border-label(\"$SCRIPT_PATH\" --kill {})+reload(\"$SCRIPT_PATH\" --list status)"
 ) || exit 0
 
 [[ -z "$sel" ]] && exit 0

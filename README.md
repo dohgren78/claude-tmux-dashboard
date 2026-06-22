@@ -38,7 +38,7 @@ cd claude-tmux-dashboard
 | `c` | Sort by context % (fullest first) |
 | `t` | Sort by last activity (most recent first) |
 | `p` | Sort by project name (A–Z) |
-| `x` | Sleep the selected live session — kills its tmux session to free RAM; the conversation persists and reappears as a dormant `z` row, resumable. No-op on dormant rows and on the dashboard's own session. |
+| `x` | Sleep the selected live session — kills its tmux session to free RAM; the conversation persists and reappears as a dormant `z` row, resumable. The border label confirms the result instantly (`slept: …`). No-op (with an explanatory label) on dormant rows, unmapped rows, and the dashboard's own session — you can't sleep the session you're viewing from. |
 | `r` | Refresh |
 
 Because `s`/`c`/`t`/`p`/`x` are action keys they don't type-to-filter the fzf query — fine for a short list.
