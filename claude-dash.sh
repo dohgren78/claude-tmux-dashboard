@@ -71,6 +71,17 @@ pane_lookup() {
   awk -F'|' -v key="$tty" '$1==key {print $2"|"$3"|"$4; exit}' "$mapfile"
 }
 
+# Most-recent transcript for a project path. Prints "sessionId<TAB>mtime" or "".
+latest_transcript() {
+  local path="$1" slug dir f
+  slug="${path//\//-}"
+  dir="$PROJECTS_DIR/$slug"
+  [[ -d "$dir" ]] || return 0
+  f=$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1) || return 0
+  [[ -n "$f" ]] || return 0
+  printf '%s\t%s' "$(basename "$f" .jsonl)" "$(stat -f %m "$f" 2>/dev/null || echo 0)"
+}
+
 # ── build tty→pane map ───────────────────────────────────────────────────────
 # Written to a temp file: one line per pane:
 #   stripped_tty|sess|win|pane|path|cmd
@@ -164,6 +175,24 @@ enumerate_sessions() {
 "
   done
 
+  # Dormant (resumable) projects: cproj registry entries whose tmux session
+  # is NOT currently live. Resume on Enter via `cproj cont <name>`.
+  local registry="$HOME/.config/claude-project/projects.tsv"
+  if [[ -f "$registry" ]]; then
+    local live_tmux dname dpath
+    live_tmux=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+    while IFS=$'\t' read -r dname dpath; do
+      [[ -n "$dname" && -n "$dpath" && -d "$dpath" ]] || continue
+      printf '%s\n' "$live_tmux" | grep -qxF "$dname" && continue
+      local lt dsid dmt dact
+      lt=$(latest_transcript "$dpath")
+      if [[ -n "$lt" ]]; then dsid="${lt%%	*}"; dmt="${lt##*	}"; else dsid="-"; dmt=0; fi
+      if [[ "$dmt" != "0" ]]; then dact=$(elapsed_human "$dmt"); else dact="-"; fi
+      rows="${rows}"$'\033[2;37mz\033[0m'"	-	${dname}	(resume)	${dact}	5	RESUME|${dname}	-	-	${dpath}	${dsid}	${dmt}
+"
+    done < "$registry"
+  fi
+
   # Sort mode (strip trailing blank line first). Default = status priority
   # (col 6 asc: waiting first) then most-recent activity (col 12 epoch desc).
   local sortargs
@@ -189,6 +218,7 @@ preview_session() {
     1) status_word="busy"    ; glyph_plain=">" ;;
     2) status_word="bg-shell (live, has a background shell)" ; glyph_plain="&" ;;
     3) status_word="idle"    ; glyph_plain="." ;;
+    5) status_word="dormant — press Enter to resume (cproj cont)" ; glyph_plain="z" ;;
     *) status_word="unknown" ; glyph_plain="?" ;;
   esac
 
@@ -217,7 +247,7 @@ preview_session() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human context_pct transcript_mtime pane_lookup preview_session enumerate_sessions
+export -f elapsed_human context_pct transcript_mtime pane_lookup latest_transcript preview_session enumerate_sessions
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -243,13 +273,13 @@ sel=$(
         --delimiter=$'\t' \
         --with-nth=1,2,3,4,5 \
         --border=rounded \
-        --border-label=' claude-dash · live sessions ' \
+        --border-label=' claude-dash · sessions ' \
         --border-label-pos=2 \
         --color=fg:-1,bg:-1,hl:#ffaf5f,fg+:#ffffff,bg+:#262626,hl+:#ffd75f,header:#87afaf,info:#6c6c6c,pointer:#ff5f5f,prompt:#5fafd7,border:#5f87af,label:#afd7ff,gutter:-1 \
         --pointer='▶' \
         --prompt='filter ▸ ' \
         --info=inline \
-        --header=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    r=refresh    Enter=jump\n\033[2mSTAT  CTX%  PROJECT               TARGET             LAST\033[0m' \
+        --header=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    r=refresh    Enter=jump/resume\n\033[2mSTAT  CTX%  PROJECT               TARGET             LAST\033[0m' \
         --preview="\"$SCRIPT_PATH\" --preview {}" \
         --preview-window=right:45%:wrap:border-left \
         --bind "r:reload(\"$SCRIPT_PATH\" --list status)" \
@@ -262,6 +292,12 @@ sel=$(
 [[ -z "$sel" ]] && exit 0
 
 jump=$(printf '%s' "$sel" | cut -f7)
+
+# Dormant row → resume the project via cproj (creates the session + claude --continue).
+if [[ "$jump" == RESUME\|* ]]; then
+  exec "$HOME/bin/cproj" cont "${jump#RESUME|}"
+fi
+
 [[ "$jump" == "-" || -z "$jump" ]] && { echo "no tmux pane for this session" >&2; exit 0; }
 
 IFS='|' read -r j_sess j_win j_pane <<< "$jump"

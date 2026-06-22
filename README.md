@@ -6,12 +6,14 @@ Built for running many Claude Code sessions in parallel (one project per tmux se
 
 ```
 ╭─ claude-dash · live sessions ─────────────────────────────────╮
-│ ? wait   > busy   & bg-shell   . idle                         │
-│ sort: [s]tatus  [c]tx%  [t]ime  [p]roj  ·  r=refresh  Enter=jump│
+│ ? wait  > busy  & bg-shell  . idle  z resume                  │
+│ sort: [s]tatus [c]tx% [t]ime [p]roj · r=refresh · Enter=jump/resume│
 │ STAT  CTX%  PROJECT               TARGET             LAST      │
 │ ▶ ?    41%   homelab-fixes         homelab:1.1        2m       │
 │   >    88%   ios-healthkit         ios:1.1            5s       │
 │   .    63%   dev-env               dev:1.1            1h       │
+│   z     -    quantcorp             (resume)           3h       │
+│   z     -    media-creation        (resume)           1d       │
 ╰───────────────────────────────────────────────────────────────╯
 ```
 
@@ -31,7 +33,7 @@ cd claude-tmux-dashboard
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Jump to that session's tmux pane |
+| `Enter` | Live row → jump to its tmux pane. Dormant (`z`) row → resume it (`cproj cont`) |
 | `s` | Sort by status (default: waiting → busy → bg-shell → idle, recent first within each) |
 | `c` | Sort by context % (fullest first) |
 | `t` | Sort by last activity (most recent first) |
@@ -47,6 +49,7 @@ Because `s`/`c`/`t`/`p` are sort keys they don't type-to-filter the fzf query �
   - `>` busy (Claude working)
   - `&` bg-shell — live session with a background shell running (Claude reports `status: "shell"` whenever a session has ≥1 background shell)
   - `.` idle
+  - `z` dormant — a quit session you can bring back. Listed below the live ones; **Enter resumes it** via `cproj cont` (recreates the tmux session and runs `claude --continue`).
 - **CTX%** — context-window fill, from the transcript's last token-usage record. Window-aware (÷200k, or ÷1M for 1M-window sessions), capped at 99%.
 - **TARGET** — the tmux `session:window.pane` it lives in.
 - **LAST** — time since last activity.
@@ -56,10 +59,11 @@ Because `s`/`c`/`t`/`p` are sort keys they don't type-to-filter the fzf query �
 - **Live sessions** come from `~/.claude/sessions/<pid>.json` (`pid`, `status`, `waitingFor`, `cwd`, `sessionId`, `updatedAt`). Dead PIDs are filtered out.
 - **tty → pane** mapping is resolved at query time by joining `ps -o tty= -p <pid>` against `tmux list-panes -a` — no stale cache.
 - **Context %** is parsed from the session transcript (`~/.claude/projects/<slug>/<sessionId>.jsonl`), summing the last record's input + cache-read + cache-creation + output tokens.
+- **Dormant (`z`) sessions** come from the [`cproj`](#) registry (`~/.config/claude-project/projects.tsv`) — registered projects whose tmux session isn't currently live. Their last-activity is the most recent transcript mtime in the project. Requires the `cproj` wrapper for the resume action.
 
 ## Read-only
 
-The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutation it performs is the explicit jump (`select-window` / `select-pane` / `switch-client`) when you press Enter.
+The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit Enter actions: **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** (`cproj cont <name>`, which creates the tmux session and runs `claude --continue`) for a dormant row.
 
 ## License
 
