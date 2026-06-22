@@ -33,7 +33,7 @@ cd claude-tmux-dashboard
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Live row → jump to its tmux pane. Dormant (`z`) row → resume it (`cproj cont`) |
+| `Enter` | Live row → jump to its tmux pane. Dormant (`z`) row → resume that exact conversation (`claude --resume`) |
 | `s` | Sort by status (default: waiting → busy → bg-shell → idle, recent first within each) |
 | `c` | Sort by context % (fullest first) |
 | `t` | Sort by last activity (most recent first) |
@@ -49,7 +49,7 @@ Because `s`/`c`/`t`/`p` are sort keys they don't type-to-filter the fzf query �
   - `>` busy (Claude working)
   - `&` bg-shell — live session with a background shell running (Claude reports `status: "shell"` whenever a session has ≥1 background shell)
   - `.` idle
-  - `z` dormant — a quit session you can bring back. Listed below the live ones; **Enter resumes it** via `cproj cont` (recreates the tmux session and runs `claude --continue`).
+  - `z` dormant — a recent conversation you've closed. Listed below the live ones; **Enter resumes that exact conversation** (`claude --resume <sessionId>`) in a fresh tmux session at its directory.
 - **CTX%** — context-window fill, from the transcript's last token-usage record. Window-aware (÷200k, or ÷1M for 1M-window sessions), capped at 99%.
 - **TARGET** — the tmux `session:window.pane` it lives in.
 - **LAST** — time since last activity.
@@ -59,11 +59,11 @@ Because `s`/`c`/`t`/`p` are sort keys they don't type-to-filter the fzf query �
 - **Live sessions** come from `~/.claude/sessions/<pid>.json` (`pid`, `status`, `waitingFor`, `cwd`, `sessionId`, `updatedAt`). Dead PIDs are filtered out.
 - **tty → pane** mapping is resolved at query time by joining `ps -o tty= -p <pid>` against `tmux list-panes -a` — no stale cache.
 - **Context %** is parsed from the session transcript (`~/.claude/projects/<slug>/<sessionId>.jsonl`), summing the last record's input + cache-read + cache-creation + output tokens.
-- **Dormant (`z`) sessions** come from the [`cproj`](#) registry (`~/.config/claude-project/projects.tsv`) — registered projects whose tmux session isn't currently live. Their last-activity is the most recent transcript mtime in the project. Requires the `cproj` wrapper for the resume action.
+- **Dormant (`z`) sessions** are the most-recent transcripts (last 14 days, capped at 12) whose session isn't currently live — i.e. conversations you've closed. Each row carries the exact `sessionId` (and the `cwd`, read straight from the transcript), so resume targets that precise conversation rather than "the most recent one in the directory." Subagent (`agent-*`) transcripts are excluded.
 
 ## Read-only
 
-The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit Enter actions: **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** (`cproj cont <name>`, which creates the tmux session and runs `claude --continue`) for a dormant row.
+The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit Enter actions: **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** for a dormant row (creates a tmux session and runs `claude --resume <sessionId>`).
 
 ## License
 

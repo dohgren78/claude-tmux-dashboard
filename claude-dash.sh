@@ -71,17 +71,6 @@ pane_lookup() {
   awk -F'|' -v key="$tty" '$1==key {print $2"|"$3"|"$4; exit}' "$mapfile"
 }
 
-# Most-recent transcript for a project path. Prints "sessionId<TAB>mtime" or "".
-latest_transcript() {
-  local path="$1" slug dir f
-  slug="${path//\//-}"
-  dir="$PROJECTS_DIR/$slug"
-  [[ -d "$dir" ]] || return 0
-  f=$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1) || return 0
-  [[ -n "$f" ]] || return 0
-  printf '%s\t%s' "$(basename "$f" .jsonl)" "$(stat -f %m "$f" 2>/dev/null || echo 0)"
-}
-
 # ── build tty→pane map ───────────────────────────────────────────────────────
 # Written to a temp file: one line per pane:
 #   stripped_tty|sess|win|pane|path|cmd
@@ -103,7 +92,7 @@ fi
 
 enumerate_sessions() {
   local mode="${1:-status}"
-  local rows="" row
+  local rows="" row live_sids=""
   shopt -s nullglob
 
   for f in "$SESSIONS_DIR"/*.json; do
@@ -120,6 +109,7 @@ enumerate_sessions() {
 
     # Dead-pid filter — stale files persist after pid dies
     ps -p "$pid" -o pid= >/dev/null 2>&1 || continue
+    live_sids="${live_sids}${sid}"$'\n'
 
     # Resolve tty → pane via temp mapfile
     local raw_tty tty pane_info jump_target tmux_target
@@ -175,23 +165,24 @@ enumerate_sessions() {
 "
   done
 
-  # Dormant (resumable) projects: cproj registry entries whose tmux session
-  # is NOT currently live. Resume on Enter via `cproj cont <name>`.
-  local registry="$HOME/.config/claude-project/projects.tsv"
-  if [[ -f "$registry" ]]; then
-    local live_tmux dname dpath
-    live_tmux=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
-    while IFS=$'\t' read -r dname dpath; do
-      [[ -n "$dname" && -n "$dpath" && -d "$dpath" ]] || continue
-      printf '%s\n' "$live_tmux" | grep -qxF "$dname" && continue
-      local lt dsid dmt dact
-      lt=$(latest_transcript "$dpath")
-      if [[ -n "$lt" ]]; then dsid="${lt%%	*}"; dmt="${lt##*	}"; else dsid="-"; dmt=0; fi
-      if [[ "$dmt" != "0" ]]; then dact=$(elapsed_human "$dmt"); else dact="-"; fi
-      rows="${rows}"$'\033[2;37mz\033[0m'"	-	${dname}	(resume)	${dact}	5	RESUME|${dname}	-	-	${dpath}	${dsid}	${dmt}
+  # Dormant (resumable) conversations: the most-recent transcripts (<=14d) whose
+  # session is NOT currently live. Keyed by EXACT sessionId so resume targets the
+  # precise conversation — never "most recent in the cwd" (which grabbed the wrong
+  # or a live session). Capped to the recent dozen; older ones via `claude --resume`.
+  local dcount=0 dmt tf dsid dcwd dname dact
+  while IFS=$'\t' read -r dmt tf; do
+    [[ -n "$tf" ]] || continue
+    dsid=$(basename "$tf" .jsonl)
+    [[ "$dsid" == agent-* ]] && continue            # subagent transcript, not resumable
+    printf '%s' "$live_sids" | grep -qxF "$dsid" && continue
+    dcwd=$(grep -m1 -o '"cwd":"[^"]*"' "$tf" 2>/dev/null | sed 's/.*"cwd":"//; s/"$//')
+    [[ -n "$dcwd" ]] || continue
+    dact=$(elapsed_human "$dmt" 2>/dev/null || echo "-")
+    dname=$(basename "$dcwd")
+    rows="${rows}"$'\033[2;37mz\033[0m'"	-	${dname}	(resume)	${dact}	5	RESUME|${dsid}|${dcwd}	-	-	${dcwd}	${dsid}	${dmt}
 "
-    done < "$registry"
-  fi
+    dcount=$((dcount+1)); [[ $dcount -ge 12 ]] && break
+  done < <(find "$PROJECTS_DIR" -name '*.jsonl' -mtime -14 -print0 2>/dev/null | xargs -0 stat -f '%m	%N' 2>/dev/null | sort -rn)
 
   # Sort mode (strip trailing blank line first). Default = status priority
   # (col 6 asc: waiting first) then most-recent activity (col 12 epoch desc).
@@ -247,7 +238,7 @@ preview_session() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human context_pct transcript_mtime pane_lookup latest_transcript preview_session enumerate_sessions
+export -f elapsed_human context_pct transcript_mtime pane_lookup preview_session enumerate_sessions
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -293,9 +284,15 @@ sel=$(
 
 jump=$(printf '%s' "$sel" | cut -f7)
 
-# Dormant row → resume the project via cproj (creates the session + claude --continue).
+# Dormant row → resume THIS exact conversation (claude --resume <sessionId>) in a
+# fresh tmux session at its cwd. Never --continue (which grabs the cwd's most-recent).
 if [[ "$jump" == RESUME\|* ]]; then
-  exec "$HOME/bin/cproj" cont "${jump#RESUME|}"
+  IFS='|' read -r _ r_sid r_cwd <<< "$jump"
+  r_name=$(basename "$r_cwd")
+  if tmux has-session -t "$r_name" 2>/dev/null; then r_name="${r_name}-${r_sid:0:6}"; fi
+  tmux new-session -d -s "$r_name" -c "$r_cwd" -n claude
+  tmux send-keys -t "$r_name:claude" "claude --resume $r_sid" C-m
+  exec tmux switch-client -t "$r_name"
 fi
 
 [[ "$jump" == "-" || -z "$jump" ]] && { echo "no tmux pane for this session" >&2; exit 0; }
