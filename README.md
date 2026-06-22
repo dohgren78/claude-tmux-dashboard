@@ -73,6 +73,34 @@ The script never writes Claude session state and never touches tmux session-pers
 - Status glyphs map Claude Code's `status` values (`waiting` / `busy` / `idle` / `shell`); `shell` means the session holds ≥1 background shell, not that it's parked.
 - **No `cproj` or other personal tooling required.** Sleep kills a tmux session; resume runs `claude --resume <id>` in a fresh one — both plain tmux.
 
+## State & recovery
+
+The dashboard is stateless except for one file: **`~/.claude/.claude-dash-slept`** — appended each time you sleep a session with `x`, one line per sleep:
+
+```
+<sessionId>\t<tmux-name>\t<cwd>
+```
+
+The dormant `z` list is built entirely from it (entries that aren't currently live and still have a transcript; newest name per `sessionId` wins). Practical notes:
+
+- **Clear the slept list:** `rm ~/.claude/.claude-dash-slept`. (The conversations are untouched — this tool never deletes transcripts.)
+- **Rebuild it after data loss / for sessions slept before this file existed:** the conversations live on as transcripts, so you can reconstruct the file from the most-recent non-live transcript per project. Each transcript carries its own `cwd`:
+
+  ```sh
+  # one resumable entry per project (most-recent non-live conversation, last 3 days)
+  live=$(for f in ~/.claude/sessions/*.json; do ps -p "$(jq -r .pid "$f")" -o pid= >/dev/null 2>&1 && jq -r .sessionId "$f"; done)
+  for d in ~/.claude/projects/*/; do
+    for tf in $(ls -t "$d"*.jsonl 2>/dev/null); do
+      sid=${tf##*/}; sid=${sid%.jsonl}
+      case $sid in agent-*) continue;; esac
+      printf '%s\n' "$live" | grep -qxF "$sid" && continue
+      cwd=$(grep -m1 -o '"cwd":"[^"]*"' "$tf" | sed 's/.*"cwd":"//;s/"$//')
+      printf '%s\t%s\t%s\n' "$sid" "${cwd##*/}" "$cwd" >> ~/.claude/.claude-dash-slept
+      break
+    done
+  done
+  ```
+
 ## License
 
 Personal tool, no warranty. Use at your own risk.
