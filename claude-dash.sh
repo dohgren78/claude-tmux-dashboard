@@ -7,7 +7,7 @@ set -euo pipefail
 
 SESSIONS_DIR="$HOME/.claude/sessions"
 PROJECTS_DIR="$HOME/.claude/projects"
-NAMES_FILE="$HOME/.claude/.claude-dash-slept"   # sessionId<TAB>tmux-name, written on sleep
+NAMES_FILE="$HOME/.claude/.claude-dash-slept"   # sessionId<TAB>tmux-name<TAB>cwd, written on sleep
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -172,27 +172,28 @@ enumerate_sessions() {
 "
   done
 
-  # Dormant (resumable) conversations: the most-recent transcripts (<=14d) whose
-  # session is NOT currently live. Keyed by EXACT sessionId so resume targets the
-  # precise conversation — never "most recent in the cwd" (which grabbed the wrong
-  # or a live session). Capped to the recent dozen; older ones via `claude --resume`.
-  local dcount=0 dmt tf dsid dcwd dname dact zdisp
-  while IFS=$'\t' read -r dmt tf; do
-    [[ -n "$tf" ]] || continue
-    dsid=$(basename "$tf" .jsonl)
-    [[ "$dsid" == agent-* ]] && continue            # subagent transcript, not resumable
-    printf '%s' "$live_sids" | grep -qxF "$dsid" && continue
-    dcwd=$(grep -m1 -o '"cwd":"[^"]*"' "$tf" 2>/dev/null | sed 's/.*"cwd":"//; s/"$//')
-    [[ -n "$dcwd" ]] || continue
-    dact=$(elapsed_human "$dmt" 2>/dev/null || echo "-")
-    # Prefer the original tmux name recorded at sleep; else fall back to cwd basename
-    dname=$(grep -F "${dsid}"$'\t' "$NAMES_FILE" 2>/dev/null | tail -1 | cut -f2 || true)
-    [[ -n "$dname" ]] || dname="${dcwd##*/}"
-    printf -v zdisp '%-4s %-20.20s %-20.20s %-4s' "-" "$dname" "(resume)" "$dact"
-    rows="${rows}"$'\033[2;37mz\033[0m'"	-	${dname}	(resume)	${dact}	5	RESUME|${dsid}|${dcwd}	-	-	${dcwd}	${dsid}	${dmt}	"$'\033[2;37mz\033[0m'" ${zdisp}
+  # Dormant (resumable) = sessions YOU slept via x (recorded in NAMES_FILE) that
+  # aren't currently live. Not a scan of every old transcript — just your parked
+  # sessions. Keyed by exact sessionId; resume targets that precise conversation.
+  if [[ -f "$NAMES_FILE" ]]; then
+    local seen="" dcount=0 nsid nname ncwd nslug ntf nmt ndact nzdisp
+    while IFS=$'\t' read -r nsid nname ncwd; do
+      [[ -n "$nsid" && -n "$ncwd" ]] || continue
+      case "$seen" in *"|${nsid}|"*) continue ;; esac   # newest entry per sid wins
+      seen="${seen}|${nsid}|"
+      printf '%s' "$live_sids" | grep -qxF "$nsid" && continue   # resumed/live now → skip
+      nslug="${ncwd//\//-}"
+      ntf="$PROJECTS_DIR/$nslug/$nsid.jsonl"
+      [[ -f "$ntf" ]] || continue                        # transcript gone → can't resume
+      nmt=$(stat -f %m "$ntf" 2>/dev/null || echo 0)
+      ndact=$(elapsed_human "$nmt" 2>/dev/null || echo "-")
+      [[ -n "$nname" ]] || nname="${ncwd##*/}"
+      printf -v nzdisp '%-4s %-20.20s %-20.20s %-4s' "-" "$nname" "(resume)" "$ndact"
+      rows="${rows}"$'\033[2;37mz\033[0m'"	-	${nname}	(resume)	${ndact}	5	RESUME|${nsid}|${ncwd}	-	-	${ncwd}	${nsid}	${nmt}	"$'\033[2;37mz\033[0m'" ${nzdisp}
 "
-    dcount=$((dcount+1)); [[ $dcount -ge 12 ]] && break
-  done < <(find "$PROJECTS_DIR" -name '*.jsonl' -mtime -14 -print0 2>/dev/null | xargs -0 stat -f '%m	%N' 2>/dev/null | sort -rn)
+      dcount=$((dcount+1)); [[ $dcount -ge 20 ]] && break
+    done < <(tail -r "$NAMES_FILE" 2>/dev/null)          # newest first
+  fi
 
   # Sort mode (strip trailing blank line first). Default = status priority
   # (col 6 asc: waiting first) then most-recent activity (col 12 epoch desc).
@@ -252,7 +253,7 @@ preview_session() {
 # No-op (with an explanatory label) on dormant rows, unmapped rows, and on the
 # session the dashboard itself is attached to.
 kill_session() {
-  local line="$1" jump sess cur sid name
+  local line="$1" jump sess cur sid cwd
   jump=$(printf '%s' "$line" | cut -f7)
   if [[ "$jump" == RESUME\|* ]]; then printf ' z row — press Enter to resume (x only sleeps live) '; return 0; fi
   if [[ "$jump" == "-" || -z "$jump" ]]; then printf ' no tmux pane — nothing to sleep '; return 0; fi
@@ -261,9 +262,10 @@ kill_session() {
   cur=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
   if [[ -n "$cur" && "$sess" == "$cur" ]]; then printf ' cannot sleep the current session (%s) ' "$sess"; return 0; fi
   if tmux kill-session -t "$sess" 2>/dev/null; then
-    # Record sessionId -> tmux name so resume restores the original name
+    # Record sessionId -> tmux name -> cwd: the dormant 'z' list is built from this.
     sid=$(printf '%s' "$line" | cut -f11)
-    [[ -n "$sid" ]] && printf '%s\t%s\n' "$sid" "$sess" >> "$NAMES_FILE" 2>/dev/null
+    cwd=$(printf '%s' "$line" | cut -f10)
+    [[ -n "$sid" ]] && printf '%s\t%s\t%s\n' "$sid" "$sess" "$cwd" >> "$NAMES_FILE" 2>/dev/null
     printf ' slept: %s (now a z row) ' "$sess"
   else printf ' could not sleep %s ' "$sess"; fi
 }

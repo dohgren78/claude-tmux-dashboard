@@ -50,7 +50,7 @@ Because `s`/`c`/`t`/`p`/`x` are action keys they don't type-to-filter the fzf qu
   - `>` busy (Claude working)
   - `&` bg-shell — live session with a background shell running (Claude reports `status: "shell"` whenever a session has ≥1 background shell)
   - `.` idle
-  - `z` dormant — a recent conversation you've closed. Listed below the live ones; **Enter resumes that exact conversation** (`claude --resume <sessionId>`) in a fresh tmux session at its directory.
+  - `z` dormant — a session you **slept** with `x` (and haven't resumed yet). Listed below the live ones; **Enter resumes that exact conversation** (`claude --resume <sessionId>`) in a fresh tmux session, restoring its original name.
 - **CTX%** — context-window fill, from the transcript's last token-usage record. Window-aware (÷200k, or ÷1M for 1M-window sessions), capped at 99%.
 - **TARGET** — the tmux `session:window.pane` it lives in.
 - **LAST** — time since last activity.
@@ -60,7 +60,7 @@ Because `s`/`c`/`t`/`p`/`x` are action keys they don't type-to-filter the fzf qu
 - **Live sessions** come from `~/.claude/sessions/<pid>.json` (`pid`, `status`, `waitingFor`, `cwd`, `sessionId`, `updatedAt`). Dead PIDs are filtered out.
 - **tty → pane** mapping is resolved at query time by joining `ps -o tty= -p <pid>` against `tmux list-panes -a` — no stale cache.
 - **Context %** is parsed from the session transcript (`~/.claude/projects/<slug>/<sessionId>.jsonl`), summing the last record's input + cache-read + cache-creation + output tokens.
-- **Dormant (`z`) sessions** are the most-recent transcripts (last 14 days, capped at 12) whose session isn't currently live — i.e. conversations you've closed. Each row carries the exact `sessionId` (and the `cwd`, read straight from the transcript), so resume targets that precise conversation rather than "the most recent one in the directory." Subagent (`agent-*`) transcripts are excluded.
+- **Dormant (`z`) sessions** are the ones you slept with `x`, recorded in `~/.claude/.claude-dash-slept` (`sessionId` → tmux name → `cwd`). A `z` row shows for each slept session that isn't currently live and still has a transcript. Resume targets the exact `sessionId`, so it reopens that precise conversation under its original name — not "the most recent one in the directory." It does **not** list every old conversation you ever had; only what you parked.
 
 ## Read-only
 
