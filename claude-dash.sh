@@ -209,7 +209,7 @@ preview_session() {
     1) status_word="busy"    ; glyph_plain=">" ;;
     2) status_word="bg-shell (live, has a background shell)" ; glyph_plain="&" ;;
     3) status_word="idle"    ; glyph_plain="." ;;
-    5) status_word="dormant — press Enter to resume (cproj cont)" ; glyph_plain="z" ;;
+    5) status_word="dormant — press Enter to resume (claude --resume)" ; glyph_plain="z" ;;
     *) status_word="unknown" ; glyph_plain="?" ;;
   esac
 
@@ -236,9 +236,23 @@ preview_session() {
   fi
 }
 
+# Sleep/quit a live session: kill its tmux session (frees the RAM; the
+# conversation persists and reappears as a dormant 'z' row, resumable).
+# No-op on dormant rows and on the session the dashboard itself is attached to.
+kill_session() {
+  local line="$1" jump sess cur
+  jump=$(printf '%s' "$line" | cut -f7)
+  [[ "$jump" == RESUME\|* || "$jump" == "-" || -z "$jump" ]] && return 0
+  IFS='|' read -r sess _ _ <<< "$jump"
+  [[ -z "$sess" ]] && return 0
+  cur=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+  [[ "$sess" == "$cur" ]] && return 0   # never kill our own session
+  tmux kill-session -t "$sess" 2>/dev/null || true
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human context_pct transcript_mtime pane_lookup preview_session enumerate_sessions
+export -f elapsed_human context_pct transcript_mtime pane_lookup preview_session enumerate_sessions kill_session
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -248,6 +262,11 @@ fi
 
 if [[ "${1:-}" == "--preview" ]]; then
   preview_session "${2:-}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--kill" ]]; then
+  kill_session "${2:-}"
   exit 0
 fi
 
@@ -270,14 +289,15 @@ sel=$(
         --pointer='▶' \
         --prompt='filter ▸ ' \
         --info=inline \
-        --header=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    r=refresh    Enter=jump/resume\n\033[2mSTAT  CTX%  PROJECT               TARGET             LAST\033[0m' \
+        --header=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    [x]=sleep  r=refresh  Enter=jump/resume\n\033[2mSTAT  CTX%  PROJECT               TARGET             LAST\033[0m' \
         --preview="\"$SCRIPT_PATH\" --preview {}" \
         --preview-window=right:45%:wrap:border-left \
         --bind "r:reload(\"$SCRIPT_PATH\" --list status)" \
         --bind "s:reload(\"$SCRIPT_PATH\" --list status)" \
         --bind "c:reload(\"$SCRIPT_PATH\" --list ctx)" \
         --bind "t:reload(\"$SCRIPT_PATH\" --list activity)" \
-        --bind "p:reload(\"$SCRIPT_PATH\" --list project)"
+        --bind "p:reload(\"$SCRIPT_PATH\" --list project)" \
+        --bind "x:execute-silent(\"$SCRIPT_PATH\" --kill {})+reload(\"$SCRIPT_PATH\" --list status)"
 ) || exit 0
 
 [[ -z "$sel" ]] && exit 0

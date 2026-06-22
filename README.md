@@ -19,7 +19,7 @@ Built for running many Claude Code sessions in parallel (one project per tmux se
 
 ## Install
 
-Requires `fzf`, `jq`, and `tmux`.
+Requires [Claude Code](https://claude.com/claude-code), `tmux`, `fzf`, and `jq`. No other dependencies — it reads Claude Code's own session/transcript files and shells out to `tmux`; there's no personal wrapper or extra service to install.
 
 ```sh
 git clone https://github.com/dohgren78/claude-tmux-dashboard.git
@@ -38,9 +38,10 @@ cd claude-tmux-dashboard
 | `c` | Sort by context % (fullest first) |
 | `t` | Sort by last activity (most recent first) |
 | `p` | Sort by project name (A–Z) |
+| `x` | Sleep the selected live session — kills its tmux session to free RAM; the conversation persists and reappears as a dormant `z` row, resumable. No-op on dormant rows and on the dashboard's own session. |
 | `r` | Refresh |
 
-Because `s`/`c`/`t`/`p` are sort keys they don't type-to-filter the fzf query — fine for a short list.
+Because `s`/`c`/`t`/`p`/`x` are action keys they don't type-to-filter the fzf query — fine for a short list.
 
 ## Columns
 
@@ -64,6 +65,13 @@ Because `s`/`c`/`t`/`p` are sort keys they don't type-to-filter the fzf query �
 ## Read-only
 
 The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit Enter actions: **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** for a dormant row (creates a tmux session and runs `claude --resume <sessionId>`).
+
+## Compatibility & assumptions
+
+- **macOS** as written — it uses BSD `tail -r`, `stat -f`, and `ps -o tty=`. On Linux, swap `tail -r`→`tac` and `stat -f %m`→`stat -c %Y` (two spots each).
+- Reads **Claude Code's internal file layout**: live sessions from `~/.claude/sessions/<pid>.json` (`pid`, `status`, `cwd`, `sessionId`) and transcripts from `~/.claude/projects/<slug>/<sessionId>.jsonl`. These are undocumented internals and can change between Claude Code versions — if a column goes blank after an update, that's the first place to look.
+- Status glyphs map Claude Code's `status` values (`waiting` / `busy` / `idle` / `shell`); `shell` means the session holds ≥1 background shell, not that it's parked.
+- **No `cproj` or other personal tooling required.** Sleep kills a tmux session; resume runs `claude --resume <id>` in a fresh one — both plain tmux.
 
 ## License
 
