@@ -5,16 +5,16 @@ A read-only [fzf](https://github.com/junegunn/fzf) popup that lists every **live
 Built for running many Claude Code sessions in parallel (one project per tmux session) where `tmux ls` alone doesn't tell you which one needs attention.
 
 ```
-╭─ claude-dash · sessions ──────────────────────────────────────────────╮
-│ ? wait   > busy   & bg-shell   . idle   z resume                       │
+╭─ claude-dash · sessions ────────────────────────────────────────────────────╮
+│ ? wait   > busy   & bg-shell   . idle   z resume                            │
 │ sort: [s]tatus [c]tx% [t]ime [p]roj · [x]=sleep r=refresh Enter=jump/resume │
-│ STAT  CTX%  PROJECT               TARGET                LAST            │
-│ ▶ ?    41%  homelab-fixes         homelab-omada:1.1     2m             │
-│   >    88%  ios-healthkit         ios-health-sync:1.1   5s             │
-│   .    63%  dev-env-optimization  dev-env-fixes:1.1     1h             │
-│   z    -    daily-porrada         (resume)              3h             │
-│   z    -    media-creation        (resume)              1d             │
-╰────────────────────────────────────────────────────────────────────────╯
+│ STAT  CTX%  PROJECT               TARGET                LAST                │
+│ ▶ ?    41%  homelab-fixes         homelab-omada:1.1     2m                  │
+│   >    88%  ios-healthkit         ios-health-sync:1.1   5s                  │
+│   .    63%  dev-env-optimization  dev-env-fixes:1.1     1h                  │
+│   z    -    daily-porrada         (resume)              3h                  │
+│   z    -    media-creation        (resume)              1d                  │
+╰─────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Live sessions on top (jump with Enter), parked ones (`z`) below (Enter resumes the exact conversation, `x` sleeps a live one).
