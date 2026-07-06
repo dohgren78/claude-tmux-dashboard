@@ -27,7 +27,7 @@ elapsed_human() {
 # Usage: context_pct <cwd> <sessionId>
 context_pct() {
   local cwd="$1" sid="$2"
-  local slug tf usage_line result
+  local slug tf usage_line model total window pct
   slug="${cwd//\//-}"
   tf="$PROJECTS_DIR/$slug/$sid.jsonl"
   if [[ ! -f "$tf" ]]; then
@@ -40,15 +40,29 @@ context_pct() {
     echo "-"
     return 0
   fi
-  result=$(printf '%s\n' "$usage_line" | jq -r '
-    .message.usage
-    | ((.input_tokens//0)+(.cache_creation_input_tokens//0)
-       +(.cache_read_input_tokens//0)+(.output_tokens//0)) as $t
-    | (if $t > 200000 then 1000000 else 200000 end) as $w
-    | (($t*100/$w)|floor) as $p
-    | "\(if $p > 99 then 99 else $p end)%"
-  ' 2>/dev/null || true)
-  echo "${result:--}"
+  # Context occupancy = prompt tokens (input + cache read + cache creation).
+  # output_tokens is the generated reply, not window occupancy at request time.
+  IFS=$'\t' read -r model total < <(printf '%s\n' "$usage_line" | jq -r '
+    [ (.message.model // "unknown"),
+      (.message.usage | ((.input_tokens//0)+(.cache_read_input_tokens//0)+(.cache_creation_input_tokens//0))) ]
+    | @tsv' 2>/dev/null)
+  if [[ -z "$total" || ! "$total" =~ ^[0-9]+$ ]]; then
+    echo "-"
+    return 0
+  fi
+  # The transcript records no context-window size, so infer it from the model.
+  # Current-generation Claude models all have a 1M-token window natively (Opus
+  # 4.5-4.8, Sonnet 4.5/4.6/5, Fable/Mythos 5); only Haiku and legacy 3.x/2.x
+  # models are 200k. So default to 1M and treat 200k as the exception.
+  # CLAUDE_DASH_200K_MODEL_RE overrides the 200k-model regex. The <=200k guard is
+  # a safety net — a session over 200k tokens is by definition on a 1M window.
+  window=1000000
+  if (( total <= 200000 )) && [[ "$model" =~ ${CLAUDE_DASH_200K_MODEL_RE:-haiku|claude-3|claude-2|claude-instant} ]]; then
+    window=200000
+  fi
+  pct=$(( total * 100 / window ))
+  (( pct > 99 )) && pct=99
+  echo "${pct}%"
 }
 
 # Mtime of transcript jsonl in epoch seconds (fall back to 0).
