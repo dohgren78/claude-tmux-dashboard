@@ -118,6 +118,70 @@ pane_lookup() {
   awk -F'|' -v key="$tty" '$1==key {print $2"|"$3"|"$4; exit}' "$mapfile"
 }
 
+# bg_instance: given a bg job's sessionId, return the daemon <inst> dir name
+# that owns its pty socket (/tmp/cc-daemon-$(id -u)/<inst>/pty/<sid>.sock), or
+# "" if none found. Relies on nullglob already being set by the caller.
+bg_instance() {
+  local sid="$1" sock
+  for sock in /tmp/cc-daemon-"$(id -u)"/*/pty/"$sid".sock; do
+    sock="${sock%/pty/*}"
+    echo "${sock##*/}"
+    return 0
+  done
+}
+
+# build_row emits exactly the 13-field tab row:
+#   1=glyph_disp 2=ctx_pct 3=proj 4=tmux_target 5=act_str 6=sortkey
+#   7=jump_target 8=waiting_for 9=pid 10=cwd 11=sid 12=act_epoch 13=display
+# Merged and single rows BOTH go through here — single source of the field
+# contract. args: sid cwd pid status waiting_for updated_at tmux_target jump_target
+build_row() {
+  local sid="$1" cwd="$2" pid="$3" sess_status="$4" waiting_for="$5" updated_at="$6" tmux_target="$7" jump_target="$8"
+
+  # Status glyph + sort key + color (ASCII glyphs, ANSI color — no emojis)
+  local glyph sortkey gcolor
+  case "$sess_status" in
+    waiting) glyph="?" ; sortkey=0 ; gcolor=$'\033[1;31m' ;;  # bold red
+    busy)    glyph=">" ; sortkey=1 ; gcolor=$'\033[1;33m' ;;  # bold yellow
+    shell)   glyph="&" ; sortkey=2 ; gcolor=$'\033[1;36m' ;;  # cyan — live, has a background shell
+    idle)    glyph="." ; sortkey=3 ; gcolor=$'\033[2;37m' ;;  # dim
+    *)       glyph="?" ; sortkey=4 ; gcolor=$'\033[0m'    ;;
+  esac
+  local glyph_disp="${gcolor}${glyph}"$'\033[0m'
+
+  # Context % + model label
+  local ctx_pct model_id model_lbl
+  IFS=$'\t' read -r ctx_pct model_id < <(context_pct "$cwd" "$sid" || true)
+  ctx_pct="${ctx_pct:--}"
+  model_lbl=$(model_label "$model_id")
+
+  # Last activity: prefer transcript mtime, fall back to updatedAt epoch ms
+  local tmtime act_epoch act_str
+  tmtime=$(transcript_mtime "$cwd" "$sid" || true)
+  tmtime="${tmtime:-0}"
+  if [[ "$tmtime" != "0" ]]; then
+    act_epoch="$tmtime"
+  else
+    act_epoch=$(( updated_at / 1000 ))
+  fi
+  act_str=$(elapsed_human "$act_epoch" || true)
+  act_str="${act_str:-?}"
+
+  # Project basename (parameter expansion — no subshell)
+  local proj="${cwd:-unknown}"
+  proj="${proj##*/}"
+
+  # Padded display column (field 13). ANSI lives only in the glyph, so the
+  # plain columns pad to fixed widths and actually line up. fzf shows field 13.
+  local disp
+  printf -v disp '%-4s %-10.10s %-20.20s %-20.20s %-4s' "$ctx_pct" "$model_lbl" "$proj" "$tmux_target" "$act_str"
+
+  # Data fields 1-12 (sort/jump/preview, unchanged) + display field 13
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s %s\n' \
+    "$glyph_disp" "$ctx_pct" "$proj" "$tmux_target" "$act_str" "$sortkey" \
+    "$jump_target" "$waiting_for" "$pid" "$cwd" "$sid" "$act_epoch" "$glyph_disp" "$disp"
+}
+
 # ── build tty→pane map ───────────────────────────────────────────────────────
 # Written to a temp file: one line per pane:
 #   stripped_tty|sess|win|pane|path|cmd
@@ -143,21 +207,45 @@ enumerate_sessions() {
   _NOW=$(date +%s)
   shopt -s nullglob
 
+  # Daemon instance dirs, computed once. Today there is a single instance —
+  # correlation for interactive records degrades to cwd-grouping when exactly
+  # one instance dir exists (see correlation_assumption in PLAN).
+  local -a INSTANCE_DIRS=()
+  local _d
+  for _d in /tmp/cc-daemon-"$(id -u)"/*/; do
+    _d="${_d%/}"
+    INSTANCE_DIRS+=("${_d##*/}")
+  done
+
+  # PASS 1: collect surviving, non-spare records into an array. Nothing is
+  # emitted here — DAEMON-MERGE (below) decides how records become rows.
+  local -a records=()
+
   for f in "$SESSIONS_DIR"/*.json; do
     [[ -f "$f" ]] || continue
 
-    # Parse all fields in one jq call
+    # Parse all fields in one jq call, including daemon `kind` (defaults to
+    # "interactive" for pre-daemon session json that predates this field).
     local fields
-    fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0)] | @tsv' "$f" 2>/dev/null) || continue
+    fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0), (.kind // "interactive")] | @tsv' "$f" 2>/dev/null) || continue
 
-    local pid sess_status waiting_for cwd sid updated_at
-    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at <<< "$fields"
+    local pid sess_status waiting_for cwd sid updated_at kind
+    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind <<< "$fields"
 
     [[ -z "$pid" ]] && continue
 
     # Dead-pid filter — stale files persist after pid dies
     ps -p "$pid" -o pid= >/dev/null 2>&1 || continue
     live_sids="${live_sids}${sid}"$'\n'
+
+    # SPARE-FILTER: primary signal is `--bg-spare` on the process cmdline.
+    # The ~232B stub session json (no usage lines) and the `rv/<id>.sock`
+    # under the daemon instance dir are corroborating signals only — the
+    # cmdline check is authoritative and runs first, before any kind-based
+    # grouping, since a spare proc's session json can carry kind=bg too.
+    local cmdline
+    cmdline=$(ps -o command= -p "$pid" 2>/dev/null || true)
+    [[ "$cmdline" == *--bg-spare* ]] && continue
 
     # Resolve tty → pane via temp mapfile
     local raw_tty tty pane_info jump_target tmux_target
@@ -175,46 +263,37 @@ enumerate_sessions() {
       jump_target="-"
     fi
 
-    # Status glyph + sort key + color (ASCII glyphs, ANSI color — no emojis)
-    local glyph sortkey gcolor
-    case "$sess_status" in
-      waiting) glyph="?" ; sortkey=0 ; gcolor=$'\033[1;31m' ;;  # bold red
-      busy)    glyph=">" ; sortkey=1 ; gcolor=$'\033[1;33m' ;;  # bold yellow
-      shell)   glyph="&" ; sortkey=2 ; gcolor=$'\033[1;36m' ;;  # cyan — live, has a background shell
-      idle)    glyph="." ; sortkey=3 ; gcolor=$'\033[2;37m' ;;  # dim
-      *)       glyph="?" ; sortkey=4 ; gcolor=$'\033[0m'    ;;
-    esac
-    local glyph_disp="${gcolor}${glyph}"$'\033[0m'
-
-    # Context % + model label
-    local ctx_pct model_id model_lbl
-    IFS=$'\t' read -r ctx_pct model_id < <(context_pct "$cwd" "$sid" || true)
-    ctx_pct="${ctx_pct:--}"
-    model_lbl=$(model_label "$model_id")
-
-    # Last activity: prefer transcript mtime, fall back to updatedAt epoch ms
-    local tmtime act_epoch act_str
-    tmtime=$(transcript_mtime "$cwd" "$sid" || true)
-    tmtime="${tmtime:-0}"
-    if [[ "$tmtime" != "0" ]]; then
-      act_epoch="$tmtime"
+    # Instance correlation (see .kind read + correlation_assumption).
+    local instance
+    if [[ "$kind" == "bg" ]]; then
+      instance=$(bg_instance "$sid")
     else
-      act_epoch=$(( updated_at / 1000 ))
+      # Interactive session json carries no instance/daemon-id field in
+      # 2.1.202 (confirmed against a live interactive record) — fall back
+      # to the sole instance dir when exactly one exists.
+      if [[ "${#INSTANCE_DIRS[@]}" -eq 1 ]]; then
+        instance="${INSTANCE_DIRS[0]}"
+      else
+        instance=""
+      fi
     fi
-    act_str=$(elapsed_human "$act_epoch" || true)
-    act_str="${act_str:-?}"
+    # NEVER let a tab-delimited record field be empty: IFS=$'\t' `read`
+    # collapses RUNS of tab (an IFS-whitespace char) exactly like it collapses
+    # runs of space, so two adjacent tabs (an empty field) silently swallow a
+    # column and shift every field after it. "-" is this script's existing
+    # placeholder for "no value" (see tmux_target/jump_target above).
+    instance="${instance:--}"
 
-    # Project basename (parameter expansion — no subshell)
-    local proj="${cwd:-unknown}"
-    proj="${proj##*/}"
+    records+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      "$kind" "$sid" "$pid" "$cwd" "$instance" "$sess_status" "$waiting_for" "$updated_at" "$tmux_target" "$jump_target")")
+  done
 
-    # Padded display column (field 13). ANSI lives only in the glyph, so the
-    # plain columns pad to fixed widths and actually line up. fzf shows field 13.
-    local disp
-    printf -v disp '%-4s %-10.10s %-20.20s %-20.20s %-4s' "$ctx_pct" "$model_lbl" "$proj" "$tmux_target" "$act_str"
-
-    # Data fields 1-12 (sort/jump/preview, unchanged) + display field 13
-    row="${glyph_disp}	${ctx_pct}	${proj}	${tmux_target}	${act_str}	${sortkey}	${jump_target}	${waiting_for}	${pid}	${cwd}	${sid}	${act_epoch}	${glyph_disp} ${disp}"
+  # PASS 2 (temporary — replaced by DAEMON-MERGE correlation): one row per
+  # surviving record, unchanged behavior minus spares.
+  local rec r_kind r_sid r_pid r_cwd r_instance r_status r_waiting r_updated r_tmux r_jump
+  for rec in "${records[@]}"; do
+    IFS=$'\t' read -r r_kind r_sid r_pid r_cwd r_instance r_status r_waiting r_updated r_tmux r_jump <<< "$rec"
+    row=$(build_row "$r_sid" "$r_cwd" "$r_pid" "$r_status" "$r_waiting" "$r_updated" "$r_tmux" "$r_jump")
     rows="${rows}${row}
 "
   done
@@ -328,7 +407,7 @@ kill_session() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human context_pct model_label mainchain_usage_line transcript_mtime pane_lookup preview_session enumerate_sessions kill_session
+export -f elapsed_human context_pct model_label mainchain_usage_line transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
