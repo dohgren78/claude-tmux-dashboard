@@ -23,7 +23,30 @@ elapsed_human() {
   fi
 }
 
-# Context % from transcript jsonl.
+# Raw model id → short display label. Pure function, single source of truth
+# for both the list column and the preview "Model:" line.
+model_label() {
+  local id="$1"
+  case "$id" in
+    claude-opus-4-8*)   echo "Opus 4.8" ;;
+    claude-opus-4-7*)   echo "Opus 4.7" ;;
+    claude-opus-4-6*)   echo "Opus 4.6" ;;
+    claude-sonnet-5*)   echo "Sonnet 5" ;;
+    claude-sonnet-4-6*) echo "Sonnet 4.6" ;;
+    claude-haiku*)      echo "Haiku" ;;
+    claude-fable-5*)    echo "Fable 5" ;;
+    ""|unknown|-)       echo "?" ;;
+    *)
+      local rest tok
+      rest="${id#claude-}"
+      tok="${rest%%-*}"
+      echo "${tok:-?}"
+      ;;
+  esac
+}
+
+# Context % from transcript jsonl. Echoes "<pct>%<TAB><raw-model-id>" (model id
+# is the raw id, NOT the label — model_label() maps it downstream).
 # Usage: context_pct <cwd> <sessionId>
 context_pct() {
   local cwd="$1" sid="$2"
@@ -31,13 +54,13 @@ context_pct() {
   slug="${cwd//\//-}"
   tf="$PROJECTS_DIR/$slug/$sid.jsonl"
   if [[ ! -f "$tf" ]]; then
-    echo "-"
+    printf '%s\t%s\n' "-" ""
     return 0
   fi
   # grep -m1 exits 1 when no match — capture result explicitly to avoid set -e
   usage_line=$(tail -r "$tf" 2>/dev/null | grep -m1 '"usage"' || true)
   if [[ -z "$usage_line" ]]; then
-    echo "-"
+    printf '%s\t%s\n' "-" ""
     return 0
   fi
   # Context occupancy = prompt tokens (input + cache read + cache creation).
@@ -47,7 +70,7 @@ context_pct() {
       (.message.usage | ((.input_tokens//0)+(.cache_read_input_tokens//0)+(.cache_creation_input_tokens//0))) ]
     | @tsv' 2>/dev/null)
   if [[ -z "$total" || ! "$total" =~ ^[0-9]+$ ]]; then
-    echo "-"
+    printf '%s\t%s\n' "-" "$model"
     return 0
   fi
   # The transcript records no context-window size, so infer it from the model.
@@ -62,7 +85,7 @@ context_pct() {
   fi
   pct=$(( total * 100 / window ))
   (( pct > 99 )) && pct=99
-  echo "${pct}%"
+  printf '%s\t%s\n' "${pct}%" "$model"
 }
 
 # Mtime of transcript jsonl in epoch seconds (fall back to 0).
@@ -154,10 +177,11 @@ enumerate_sessions() {
     esac
     local glyph_disp="${gcolor}${glyph}"$'\033[0m'
 
-    # Context %
-    local ctx_pct
-    ctx_pct=$(context_pct "$cwd" "$sid" || true)
+    # Context % + model label
+    local ctx_pct model_id model_lbl
+    IFS=$'\t' read -r ctx_pct model_id < <(context_pct "$cwd" "$sid" || true)
     ctx_pct="${ctx_pct:--}"
+    model_lbl=$(model_label "$model_id")
 
     # Last activity: prefer transcript mtime, fall back to updatedAt epoch ms
     local tmtime act_epoch act_str
@@ -178,7 +202,7 @@ enumerate_sessions() {
     # Padded display column (field 13). ANSI lives only in the glyph, so the
     # plain columns pad to fixed widths and actually line up. fzf shows field 13.
     local disp
-    printf -v disp '%-4s %-20.20s %-20.20s %-4s' "$ctx_pct" "$proj" "$tmux_target" "$act_str"
+    printf -v disp '%-4s %-10.10s %-20.20s %-20.20s %-4s' "$ctx_pct" "$model_lbl" "$proj" "$tmux_target" "$act_str"
 
     # Data fields 1-12 (sort/jump/preview, unchanged) + display field 13
     row="${glyph_disp}	${ctx_pct}	${proj}	${tmux_target}	${act_str}	${sortkey}	${jump_target}	${waiting_for}	${pid}	${cwd}	${sid}	${act_epoch}	${glyph_disp} ${disp}"
@@ -202,7 +226,7 @@ enumerate_sessions() {
       nmt=$(stat -f %m "$ntf" 2>/dev/null || echo 0)
       ndact=$(elapsed_human "$nmt" 2>/dev/null || echo "-")
       [[ -n "$nname" ]] || nname="${ncwd##*/}"
-      printf -v nzdisp '%-4s %-20.20s %-20.20s %-4s' "-" "$nname" "(resume)" "$ndact"
+      printf -v nzdisp '%-4s %-10.10s %-20.20s %-20.20s %-4s' "-" "-" "$nname" "(resume)" "$ndact"
       rows="${rows}"$'\033[2;37mz\033[0m'"	-	${nname}	(resume)	${ndact}	5	RESUME|${nsid}|${ncwd}	-	-	${ncwd}	${nsid}	${nmt}	"$'\033[2;37mz\033[0m'" ${nzdisp}
 "
       dcount=$((dcount+1)); [[ $dcount -ge 20 ]] && break
@@ -238,19 +262,28 @@ preview_session() {
     *) status_word="unknown" ; glyph_plain="?" ;;
   esac
 
+  local slug tf model_id preview_usage_line
+  slug="${cwd//\//-}"
+  tf="$PROJECTS_DIR/$slug/$sid.jsonl"
+  model_id=""
+  if [[ -f "$tf" ]]; then
+    preview_usage_line=$(tail -r "$tf" 2>/dev/null | grep -m1 '"usage"' || true)
+    if [[ -n "$preview_usage_line" ]]; then
+      model_id=$(printf '%s\n' "$preview_usage_line" | jq -r '.message.model // ""' 2>/dev/null)
+    fi
+  fi
+
   echo "Session:    $sid"
   echo "Status:     $glyph_plain $status_word"
   echo "WaitingFor: $waiting"
   echo "Context:    $ctx"
+  echo "Model:      $(model_label "$model_id")"
   echo "Pane:       $target"
   echo "LastAct:    $lastact"
   echo "CWD:        $cwd"
   echo "PID:        $pid"
   echo ""
 
-  local slug tf
-  slug="${cwd//\//-}"
-  tf="$PROJECTS_DIR/$slug/$sid.jsonl"
   if [[ -f "$tf" ]]; then
     echo "── transcript tail ──"
     tail -r "$tf" 2>/dev/null | head -30 | jq -r '
@@ -286,7 +319,7 @@ kill_session() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human context_pct transcript_mtime pane_lookup preview_session enumerate_sessions kill_session
+export -f elapsed_human context_pct model_label transcript_mtime pane_lookup preview_session enumerate_sessions kill_session
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -307,7 +340,7 @@ fi
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 # Column header padded to the same widths as the display field (see enumerate).
-printf -v COLHDR '%-2s%-4s %-20s %-20s %s' '' 'CTX%' 'PROJECT' 'TARGET' 'LAST'
+printf -v COLHDR '%-2s%-4s %-10s %-20s %-20s %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
 HEADER=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    [x]=sleep  r=refresh  Enter=jump/resume\n'$'\033[2m'"${COLHDR}"$'\033[0m'
 
 # fzf pipeline — Enter accepts and returns the selected line; jump happens
