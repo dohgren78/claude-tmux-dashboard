@@ -119,11 +119,14 @@ pane_lookup() {
 }
 
 # bg_instance: given a bg job's sessionId, return the daemon <inst> dir name
-# that owns its pty socket (/tmp/cc-daemon-$(id -u)/<inst>/pty/<sid>.sock), or
-# "" if none found. Relies on nullglob already being set by the caller.
+# that owns its pty socket. The socket is named after the daemon's short
+# jobId, which is the sessionId's first UUID segment (confirmed live:
+# jobId "a8e0cf07" == sessionId "a8e0cf07-cf17-..." prefix) — NOT the full
+# sessionId. /tmp/cc-daemon-$(id -u)/<inst>/pty/<jobId>.sock. Returns "" if
+# none found. Relies on nullglob already being set by the caller.
 bg_instance() {
-  local sid="$1" sock
-  for sock in /tmp/cc-daemon-"$(id -u)"/*/pty/"$sid".sock; do
+  local short="${1%%-*}" sock
+  for sock in /tmp/cc-daemon-"$(id -u)"/*/pty/"$short".sock; do
     sock="${sock%/pty/*}"
     echo "${sock##*/}"
     return 0
@@ -288,12 +291,70 @@ enumerate_sessions() {
       "$kind" "$sid" "$pid" "$cwd" "$instance" "$sess_status" "$waiting_for" "$updated_at" "$tmux_target" "$jump_target")")
   done
 
-  # PASS 2 (temporary — replaced by DAEMON-MERGE correlation): one row per
-  # surviving record, unchanged behavior minus spares.
-  local rec r_kind r_sid r_pid r_cwd r_instance r_status r_waiting r_updated r_tmux r_jump
+  # DAEMON-MERGE: correlate bg jobs with interactive clients into ONE logical
+  # row when they share the same daemon instance + cwd (correlation_assumption
+  # in PLAN). bash 3.2 (macOS default, no associative arrays) — parse each
+  # tab-record once into parallel indexed arrays, then correlate by linear
+  # scan. The fleet this runs against is a handful of sessions, so O(n^2) is
+  # cheap and keeps this bash-3.2-safe without reaching for `declare -A`.
+  local -a R_KIND=() R_SID=() R_PID=() R_CWD=() R_INSTANCE=() R_STATUS=() R_WAITING=() R_UPDATED=() R_TMUX=() R_JUMP=()
+  local rec rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump
   for rec in "${records[@]}"; do
-    IFS=$'\t' read -r r_kind r_sid r_pid r_cwd r_instance r_status r_waiting r_updated r_tmux r_jump <<< "$rec"
-    row=$(build_row "$r_sid" "$r_cwd" "$r_pid" "$r_status" "$r_waiting" "$r_updated" "$r_tmux" "$r_jump")
+    IFS=$'\t' read -r rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump <<< "$rec"
+    R_KIND+=("$rk"); R_SID+=("$rsid"); R_PID+=("$rpid"); R_CWD+=("$rcwd")
+    R_INSTANCE+=("$rinstance"); R_STATUS+=("$rstatus"); R_WAITING+=("$rwaiting")
+    R_UPDATED+=("$rupdated"); R_TMUX+=("$rtmux"); R_JUMP+=("$rjump")
+  done
+
+  local n=${#R_KIND[@]}
+  local consumed_interactive="|"   # pipe-delimited set of consumed record indices
+  local bi ij sj
+
+  for (( bi=0; bi<n; bi++ )); do
+    [[ "${R_KIND[$bi]}" == "bg" ]] || continue
+    local bg_key="${R_INSTANCE[$bi]}|${R_CWD[$bi]}"
+
+    # ≥2 bg jobs sharing the same instance+cwd cannot be uniquely paired with
+    # a single interactive client — emit each separately rather than mis-pair
+    # (correlation_assumption edge case).
+    local bg_sibling_count=0
+    for (( sj=0; sj<n; sj++ )); do
+      [[ "${R_KIND[$sj]}" == "bg" && "${R_INSTANCE[$sj]}|${R_CWD[$sj]}" == "$bg_key" ]] && bg_sibling_count=$((bg_sibling_count+1))
+    done
+
+    local match_ij=-1 match_count=0
+    for (( ij=0; ij<n; ij++ )); do
+      [[ "${R_KIND[$ij]}" == "interactive" ]] || continue
+      [[ "${R_INSTANCE[$ij]}|${R_CWD[$ij]}" == "$bg_key" ]] || continue
+      case "$consumed_interactive" in *"|${ij}|"*) continue ;; esac
+      match_count=$((match_count+1))
+      match_ij=$ij
+    done
+
+    if [[ "$bg_sibling_count" -eq 1 && "$match_count" -eq 1 ]]; then
+      # MERGE: bg job has identity/status/model/context authority; the
+      # interactive client contributes the tmux pane it owns (Enter jumps
+      # there, since only the interactive client has a controlling tty).
+      row=$(build_row "${R_SID[$bi]}" "${R_CWD[$bi]}" "${R_PID[$bi]}" "${R_STATUS[$bi]}" \
+                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "${R_TMUX[$match_ij]}" "${R_JUMP[$match_ij]}")
+      consumed_interactive="${consumed_interactive}${match_ij}|"
+    else
+      # No interactive partner, or ambiguous (≥2 bg siblings) → standalone,
+      # non-jumpable row. A bg job has no controlling tty of its own.
+      row=$(build_row "${R_SID[$bi]}" "${R_CWD[$bi]}" "${R_PID[$bi]}" "${R_STATUS[$bi]}" \
+                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "detached" "-")
+    fi
+    rows="${rows}${row}
+"
+  done
+
+  # Every UNCONSUMED interactive record is a plain single row — unchanged
+  # behavior for interactive sessions with no bg job.
+  for (( ij=0; ij<n; ij++ )); do
+    [[ "${R_KIND[$ij]}" == "interactive" ]] || continue
+    case "$consumed_interactive" in *"|${ij}|"*) continue ;; esac
+    row=$(build_row "${R_SID[$ij]}" "${R_CWD[$ij]}" "${R_PID[$ij]}" "${R_STATUS[$ij]}" \
+                     "${R_WAITING[$ij]}" "${R_UPDATED[$ij]}" "${R_TMUX[$ij]}" "${R_JUMP[$ij]}")
     rows="${rows}${row}
 "
   done
@@ -361,11 +422,20 @@ preview_session() {
     fi
   fi
 
+  # DAEMON-MERGE enrichment: field 11 (sid) / field 9 (pid) on a merged row
+  # are the BG job's own — surface its daemon job name (session json is keyed
+  # by pid, not sid). No field-count change; read-only lookup.
+  local job_name=""
+  if [[ -f "$SESSIONS_DIR/$pid.json" ]]; then
+    job_name=$(jq -r 'if (.kind=="bg") then (.name // "") else "" end' "$SESSIONS_DIR/$pid.json" 2>/dev/null)
+  fi
+
   echo "Session:    $sid"
   echo "Status:     $glyph_plain $status_word"
   echo "WaitingFor: $waiting"
   echo "Context:    $ctx"
   echo "Model:      $(model_label "$model_id")"
+  [[ -n "$job_name" ]] && echo "Job:        $job_name"
   echo "Pane:       $target"
   echo "LastAct:    $lastact"
   echo "CWD:        $cwd"
