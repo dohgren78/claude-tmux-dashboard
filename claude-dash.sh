@@ -45,6 +45,15 @@ model_label() {
   esac
 }
 
+# MAINCHAIN: last main-chain (non-sidechain) usage record from a transcript.
+mainchain_usage_line() {
+  local tf="$1"
+  [[ -f "$tf" ]] || return 0
+  tail -r "$tf" 2>/dev/null \
+    | jq -Rc 'fromjson? | select((.message.usage != null) and (.isSidechain != true))' 2>/dev/null \
+    | head -1 || true
+}
+
 # Context % from transcript jsonl. Echoes "<pct>%<TAB><raw-model-id>" (model id
 # is the raw id, NOT the label — model_label() maps it downstream).
 # Usage: context_pct <cwd> <sessionId>
@@ -57,8 +66,8 @@ context_pct() {
     printf '%s\t%s\n' "-" ""
     return 0
   fi
-  # grep -m1 exits 1 when no match — capture result explicitly to avoid set -e
-  usage_line=$(tail -r "$tf" 2>/dev/null | grep -m1 '"usage"' || true)
+  # Main-chain-only (skips isSidechain subagent lines) — see mainchain_usage_line.
+  usage_line=$(mainchain_usage_line "$tf")
   if [[ -z "$usage_line" ]]; then
     printf '%s\t%s\n' "-" ""
     return 0
@@ -267,7 +276,7 @@ preview_session() {
   tf="$PROJECTS_DIR/$slug/$sid.jsonl"
   model_id=""
   if [[ -f "$tf" ]]; then
-    preview_usage_line=$(tail -r "$tf" 2>/dev/null | grep -m1 '"usage"' || true)
+    preview_usage_line=$(mainchain_usage_line "$tf")
     if [[ -n "$preview_usage_line" ]]; then
       model_id=$(printf '%s\n' "$preview_usage_line" | jq -r '.message.model // ""' 2>/dev/null)
     fi
@@ -319,7 +328,7 @@ kill_session() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human context_pct model_label transcript_mtime pane_lookup preview_session enumerate_sessions kill_session
+export -f elapsed_human context_pct model_label mainchain_usage_line transcript_mtime pane_lookup preview_session enumerate_sessions kill_session
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
