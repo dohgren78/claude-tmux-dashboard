@@ -1,0 +1,56 @@
+# claude-dash visual baseline — captured 2026-07-07 22:29 (pre-redesign, quick task 260707-un0 state)
+# Commit: 9353660
+
+## HEADER (legend + sort hints + column header), ANSI stripped:
+? wait   > busy   & bg-shell   . idle   z resume
+sort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    [x]=sleep  r=refresh  Enter=jump/resume
+  CTX% MODEL      PROJECT              TARGET               LAST
+
+## LIST (default status sort), ANSI stripped, display column (field 13) only:
+> 19%  Opus 4.8   dev-env-optimization dev-env-fixes:1.1    39s 
+. 31%  Opus 4.8   whispa               whispa:1.1           1m  
+. 6%   Opus 4.8   GrapplingTracks      daily-porrada:1.1    2m  
+. 21%  Opus 4.8   AgenticCoding        google-drive-fixes:1 3m  
+. 45%  Opus 4.8   custom-skills        custom-skills:1.1    4m  
+. 38%  Opus 4.8   obsidian-fixes       obsidian-fixes:1.1   26m 
+. 13%  Opus 4.8   homelab-fixes        homelab-new-nas:1.1  1d  
+z -    -          dev-env-fixes        (resume)             1d  
+z -    -          homelab-fixes        (resume)             1d  
+z -    -          omada                (resume)             1d  
+z -    -          obsidian-notif       (resume)             6d  
+z -    -          warranty-vault       (resume)             6d  
+z -    -          subsweep             (resume)             8d  
+z -    -          investabot           (resume)             8d  
+z -    -          dohgren              (resume)             9d  
+z -    -          investabot           (resume)             14d 
+z -    -          subsweep             (resume)             15d 
+z -    -          daily-porrada        (resume)             15d 
+z -    -          ios-healthkit-sync-a (resume)             15d 
+z -    -          smart-home-fixes     (resume)             15d 
+z -    -          health-monitor       (resume)             15d 
+z -    -          quantcorp            (resume)             15d 
+z -    -          media-creation       (resume)             15d 
+z -    -          sandbox              (resume)             15d 
+z -    -          dynlada              (resume)             15d 
+
+## PREVIEW pane for the top row (ANSI stripped):
+Session:    04f07b4c-d1ff-4d1e-a10f-34981bc05f35
+Status:     > busy
+WaitingFor: -
+Context:    19%
+Model:      Opus 4.8
+Pane:       dev-env-fixes:1.1
+LastAct:    40s
+CWD:        /Users/dohgren/Code/AgenticCoding/dev-env-optimization
+PID:        55040
+
+── transcript tail ──
+user: 
+assistant: 
+user: 
+assistant: 
+pr-link: 
+mode: 
+ai-title: 
+last-prompt: 
+user: 
