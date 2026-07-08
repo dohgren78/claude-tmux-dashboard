@@ -428,10 +428,40 @@ enumerate_sessions() {
                        "${R_JOBID[$bi]}")
       consumed_interactive="${consumed_interactive}${match_ij}|"
     else
-      # No interactive partner, or ambiguous (≥2 bg siblings) → standalone,
-      # non-jumpable row. A bg job has no controlling tty of its own.
+      # DEGRADATION MARKERS: the MERGE condition failed. Distinguish three
+      # outcomes so future daemon-layout breakage is VISIBLE instead of
+      # masquerading as a normal detach (the f5v/un0 regression class was
+      # invisible until the user noticed a row "going nowhere"). Field 7
+      # (jump_target) stays "-" for all three — a bg job never has its own
+      # controlling tty, so Enter safely no-ops regardless of marker.
+      local target
+      if [[ "$bg_sibling_count" -ge 2 ]]; then
+        # 1. AMBIGUOUS: ≥2 bg jobs share instance+cwd — cannot uniquely pair
+        # with a single interactive client. Label instead of silently
+        # emitting separate detached rows.
+        target="ambiguous?"
+      else
+        # sibling==1, no unique interactive match. Distinguish "identity
+        # failed to resolve" (unlinked?) from "identity resolved fine,
+        # legitimately no interactive client" (detached) by checking the
+        # same signals the merge itself depends on: instance dir, jobId,
+        # transcript, socket.
+        local xtf sock_found=""
+        xtf=$(transcript_file "${R_CWD[$bi]}" "${R_JOBID[$bi]}")
+        for _s in /tmp/cc-daemon-"$(id -u)"/*/pty/"${R_JOBID[$bi]}"*.sock; do [[ -e "$_s" ]] && sock_found=1 && break; done
+        if [[ "${R_INSTANCE[$bi]}" == "-" || -z "${R_JOBID[$bi]}" || -z "$xtf" || -z "$sock_found" ]]; then
+          # 2. UNLINKED: daemon identity failed to resolve — the regression
+          # class this marker exists to surface (broken socket/transcript
+          # naming assumptions, missing instance dir, etc).
+          target="unlinked?"
+        else
+          # 3. DETACHED: identity resolved fine, this bg job simply has no
+          # interactive client right now — expected, legitimate, fine.
+          target="detached"
+        fi
+      fi
       row=$(build_row "${R_SID[$bi]}" "${R_CWD[$bi]}" "${R_PID[$bi]}" "${R_STATUS[$bi]}" \
-                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "detached" "-" \
+                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "$target" "-" \
                        "${R_JOBID[$bi]}")
     fi
     rows="${rows}${row}
