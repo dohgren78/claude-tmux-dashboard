@@ -451,14 +451,15 @@ preview_session() {
   local glyph ctx proj target lastact sortkey jump waiting pid cwd sid
   IFS=$'\t' read -r glyph ctx proj target lastact sortkey jump waiting pid cwd sid actepoch <<< "$line"
 
-  local status_word glyph_plain
+  # status_color matches the row's status hue (D-PREVIEW: color-matched Status line).
+  local status_word glyph_plain status_color
   case "$sortkey" in
-    0) status_word="waiting" ; glyph_plain="?" ;;
-    1) status_word="busy"    ; glyph_plain=">" ;;
-    2) status_word="bg-shell (live, has a background shell)" ; glyph_plain="&" ;;
-    3) status_word="idle"    ; glyph_plain="." ;;
-    5) status_word="dormant — press Enter to resume (claude --resume)" ; glyph_plain="z" ;;
-    *) status_word="unknown" ; glyph_plain="?" ;;
+    0) status_word="waiting" ; glyph_plain="?" ; status_color="$C_WAIT"  ;;
+    1) status_word="busy"    ; glyph_plain=">" ; status_color="$C_BUSY"  ;;
+    2) status_word="bg-shell (live, has a background shell)" ; glyph_plain="&" ; status_color="$C_SHELL" ;;
+    3) status_word="idle"    ; glyph_plain="." ; status_color="$C_IDLE"  ;;
+    5) status_word="dormant — press Enter to resume (claude --resume)" ; glyph_plain="z" ; status_color="$C_DIM"  ;;
+    *) status_word="unknown" ; glyph_plain="?" ; status_color="$C_RESET" ;;
   esac
 
   local slug tf model_id preview_usage_line
@@ -480,17 +481,23 @@ preview_session() {
     job_name=$(jq -r 'if (.kind=="bg") then (.name // "") else "" end' "$SESSIONS_DIR/$pid.json" 2>/dev/null)
   fi
 
+  # D-PREVIEW: grouped identity / state blocks, rules between, color-matched
+  # Status line. Same data reads/lookups as before — labels only reorganized.
+  local rule
+  rule=$'\033[2m'"────────────────────"$'\033[0m'
+
   echo "Session:    $sid"
-  echo "Status:     $glyph_plain $status_word"
+  [[ -n "$job_name" ]] && echo "Job:        $job_name"
+  echo "$rule"
+  echo "Status:     ${status_color}${glyph_plain} ${status_word}${C_RESET}"
   echo "WaitingFor: $waiting"
   echo "Context:    $ctx"
   echo "Model:      $(model_label "$model_id")"
-  [[ -n "$job_name" ]] && echo "Job:        $job_name"
   echo "Pane:       $target"
   echo "LastAct:    $lastact"
   echo "CWD:        $cwd"
   echo "PID:        $pid"
-  echo ""
+  echo "$rule"
 
   if [[ -f "$tf" ]]; then
     echo "── transcript tail ──"
@@ -553,7 +560,14 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 # the gauge reads as "▁19%" per D-GAUGE), hence 3 not 4 cols.
 # │ separators mirror disp/nzdisp exactly (between MODEL|PROJECT, PROJECT|TARGET, TARGET|LAST).
 printf -v COLHDR '%-3s%-4s %-10s │ %-20s │ %-20s │ %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
-HEADER=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    [x]=sleep  r=refresh  Enter=jump/resume\n'$'\033[2m'"${COLHDR}"$'\033[0m'
+# D-CHROME.2: one-line legend (glyph key only) + COLHDR. Sort/key hints moved
+# to --prompt below, freeing the second legend line.
+HEADER=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\n'$'\033[2m'"${COLHDR}"$'\033[0m'
+
+# D-CHROME.1: live (non-dormant) session count for the border label. Sort key
+# (field 6) != 5 means not-dormant. Reload (r/s/c/t/p/x binds) doesn't re-fire
+# the label — it stays at this initial count, matching fzf's reload semantics.
+live_count=$(enumerate_sessions status | awk -F'\t' '$6!=5' | wc -l | tr -d ' ')
 
 # fzf pipeline — Enter accepts and returns the selected line; jump happens
 # AFTER fzf exits / the popup closes (switch-client inside an open popup is flaky).
@@ -567,11 +581,11 @@ sel=$(
         --with-nth=13 \
         --nth=13 \
         --border=rounded \
-        --border-label=' claude-dash · sessions ' \
+        --border-label=" claude-dash · ${live_count} sessions " \
         --border-label-pos=2 \
         --color="fg:-1,bg:-1,hl:${HL},fg+:${FGP},bg+:${BGP},hl+:${HLP},header:${HDR},info:${INFO},pointer:${PTR},prompt:${PROMPT},border:${BORDER},label:${LABEL},gutter:-1" \
         --pointer='▶' \
-        --prompt='filter ▸ ' \
+        --prompt='[s/c/t/p·x] filter ▸ ' \
         --info=inline \
         --header="$HEADER" \
         --preview="\"$SCRIPT_PATH\" --preview {}" \
