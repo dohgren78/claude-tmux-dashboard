@@ -56,6 +56,22 @@ ctx_gauge() {
   fi
 }
 
+# status_icon: single source-of-truth glyph mapping (Nerd Fonts v3,
+# FontAwesome-legacy codepoints — font confirmed active: JetBrainsMono Nerd
+# Font Mono, single-width). Plain glyph only, no color — callers wrap it in
+# their own status color. If any codepoint renders as a box on a given
+# terminal, swap it for a more common v3 glyph per the inline comment.
+status_icon() {
+  case "$1" in
+    waiting) echo '' ;;  # nf-fa-hourglass, was ASCII "?"
+    busy)    echo '' ;;  # nf-fa-play, was ASCII ">"
+    shell)   echo '' ;;  # nf-fa-terminal, was ASCII "&"
+    idle)    echo '' ;;  # nf-fa-circle, was ASCII "."
+    dormant) echo '' ;;  # nf-fa-history, was ASCII "z"
+    *)       echo '' ;;  # nf-fa-question, fallback
+  esac
+}
+
 # Raw model id → short display label. Pure function, single source of truth
 # for both the list column and the preview "Model:" line.
 model_label() {
@@ -199,17 +215,19 @@ build_row() {
   local sid="$1" cwd="$2" pid="$3" sess_status="$4" waiting_for="$5" updated_at="$6" tmux_target="$7" jump_target="$8"
   local xscript_id="${9:-$sid}"
 
-  # Status glyph + sort key + color (ASCII glyphs, ANSI color — no emojis).
-  # rowcolor tints the WHOLE display row (D-ROWCOLOR): active states brighter,
-  # idle dimmer; glyph keeps its own (bolder) hue via gcolor.
-  local glyph sortkey gcolor rowcolor
+  # Status glyph (Nerd Font icon via status_icon, single source of truth) +
+  # sort key + color. rowcolor tints the WHOLE display row (D-ROWCOLOR):
+  # active states brighter, idle dimmer; glyph keeps its own (bolder) hue
+  # via gcolor — the icon inherits the status hue.
+  local statkey glyph sortkey gcolor rowcolor
   case "$sess_status" in
-    waiting) glyph="?" ; sortkey=0 ; gcolor="$C_WAIT"  ; rowcolor="$C_WAIT_ROW"  ;;
-    busy)    glyph=">" ; sortkey=1 ; gcolor="$C_BUSY"  ; rowcolor="$C_BUSY_ROW"  ;;
-    shell)   glyph="&" ; sortkey=2 ; gcolor="$C_SHELL" ; rowcolor="$C_SHELL_ROW" ;;  # live, has a background shell
-    idle)    glyph="." ; sortkey=3 ; gcolor="$C_IDLE"  ; rowcolor="$C_IDLE_ROW"  ;;
-    *)       glyph="?" ; sortkey=4 ; gcolor="$C_RESET" ; rowcolor=""             ;;
+    waiting) statkey="waiting" ; sortkey=0 ; gcolor="$C_WAIT"  ; rowcolor="$C_WAIT_ROW"  ;;
+    busy)    statkey="busy"    ; sortkey=1 ; gcolor="$C_BUSY"  ; rowcolor="$C_BUSY_ROW"  ;;
+    shell)   statkey="shell"   ; sortkey=2 ; gcolor="$C_SHELL" ; rowcolor="$C_SHELL_ROW" ;;  # live, has a background shell
+    idle)    statkey="idle"    ; sortkey=3 ; gcolor="$C_IDLE"  ; rowcolor="$C_IDLE_ROW"  ;;
+    *)       statkey=""        ; sortkey=4 ; gcolor="$C_RESET" ; rowcolor=""             ;;
   esac
+  glyph=$(status_icon "$statkey")
   local glyph_disp="${gcolor}${glyph}"$'\033[0m'
 
   # Context % + model label
@@ -248,8 +266,9 @@ build_row() {
   local disp_colored="${rowcolor}${disp}${C_RESET}"
 
   # Data fields 1-12 (sort/jump/preview, unchanged) + display field 13.
-  # field 13 = "<glyph_disp> <gauge_tok><rowcolor><disp><reset>"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s %s%s\n' \
+  # field 13 = "<glyph_disp> <gauge_tok> <rowcolor><disp><reset>" — added a
+  # space between gauge_tok and disp (was cramped as "▁14%"; now "▁ 14%").
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s %s %s\n' \
     "$glyph_disp" "$ctx_pct" "$proj" "$tmux_target" "$act_str" "$sortkey" \
     "$jump_target" "$waiting_for" "$pid" "$cwd" "$sid" "$act_epoch" "$glyph_disp" "$gauge_tok" "$disp_colored"
 }
@@ -448,12 +467,15 @@ enumerate_sessions() {
       [[ -n "$nname" ]] || nname="${ncwd##*/}"
       # Matching gauge-prefix + separators + row-dim as the live disp/rowcolor
       # composition — ctx_gauge "-" returns a blank placeholder (no ANSI) so
-      # the gauge column still aligns.
-      local nzgauge nzdisp_colored
+      # the gauge column still aligns. Icon uses the shared status_icon()
+      # source of truth, dim-wrapped (C_IDLE_ROW) so the resume icon carries
+      # the same dim hue as the rest of the dormant row.
+      local nzgauge nzdisp_colored nzglyph
       nzgauge=$(ctx_gauge "-")
+      nzglyph="${C_IDLE_ROW}$(status_icon dormant)${C_RESET}"
       printf -v nzdisp '%-4s %-10.10s │ %-20.20s │ %-20.20s │ %-4s' "-" "-" "$nname" "(resume)" "$ndact"
       nzdisp_colored="${C_IDLE_ROW}${nzdisp}${C_RESET}"
-      rows="${rows}"$'\033[2;37mz\033[0m'"	-	${nname}	(resume)	${ndact}	5	RESUME|${nsid}|${ncwd}	-	-	${ncwd}	${nsid}	${nmt}	"$'\033[2;37mz\033[0m'" ${nzgauge}${nzdisp_colored}
+      rows="${rows}${nzglyph}	-	${nname}	(resume)	${ndact}	5	RESUME|${nsid}|${ncwd}	-	-	${ncwd}	${nsid}	${nmt}	${nzglyph} ${nzgauge} ${nzdisp_colored}
 "
       dcount=$((dcount+1)); [[ $dcount -ge 20 ]] && break
     done < <(tail -r "$NAMES_FILE" 2>/dev/null)          # newest first
@@ -590,11 +612,11 @@ fi
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 # Column header padded to the same widths as the display field (see enumerate).
-# Leading %-3s accounts for the field-13 prefix: glyph(1)+space(1)+gauge(1) — the
-# gauge butts directly against the CTX% number in disp (no separating space, so
-# the gauge reads as "▁19%" per D-GAUGE), hence 3 not 4 cols.
+# Leading %-4s accounts for the field-13 prefix: glyph(1)+space(1)+gauge(1)+space(1)
+# — the gauge now has a separating space before the CTX% number (reads "▁ 19%"
+# per D-GAUGE), hence 4 not 3 cols.
 # │ separators mirror disp/nzdisp exactly (between MODEL|PROJECT, PROJECT|TARGET, TARGET|LAST).
-printf -v COLHDR '%-3s%-4s %-10s │ %-20s │ %-20s │ %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
+printf -v COLHDR '%-4s%-4s %-10s │ %-20s │ %-20s │ %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
 # D-CHROME.2: one-line legend (glyph key only) + COLHDR. Sort/key hints moved
 # to --prompt below, freeing the second legend line.
 HEADER=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\n'$'\033[2m'"${COLHDR}"$'\033[0m'
