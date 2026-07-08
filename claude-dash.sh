@@ -500,15 +500,17 @@ preview_session() {
   local glyph ctx proj target lastact sortkey jump waiting pid cwd sid
   IFS=$'\t' read -r glyph ctx proj target lastact sortkey jump waiting pid cwd sid actepoch <<< "$line"
 
-  # status_color matches the row's status hue (D-PREVIEW: color-matched Status line).
+  # status_color matches the row's status hue (D-PREVIEW: color-matched Status
+  # line). glyph_plain uses the same status_icon() source of truth as the
+  # list row, so the preview Status line mirrors the list icon exactly.
   local status_word glyph_plain status_color
   case "$sortkey" in
-    0) status_word="waiting" ; glyph_plain="?" ; status_color="$C_WAIT"  ;;
-    1) status_word="busy"    ; glyph_plain=">" ; status_color="$C_BUSY"  ;;
-    2) status_word="bg-shell (live, has a background shell)" ; glyph_plain="&" ; status_color="$C_SHELL" ;;
-    3) status_word="idle"    ; glyph_plain="." ; status_color="$C_IDLE"  ;;
-    5) status_word="dormant — press Enter to resume (claude --resume)" ; glyph_plain="z" ; status_color="$C_DIM"  ;;
-    *) status_word="unknown" ; glyph_plain="?" ; status_color="$C_RESET" ;;
+    0) status_word="waiting" ; glyph_plain=$(status_icon waiting) ; status_color="$C_WAIT"  ;;
+    1) status_word="busy"    ; glyph_plain=$(status_icon busy)    ; status_color="$C_BUSY"  ;;
+    2) status_word="bg-shell (live, has a background shell)" ; glyph_plain=$(status_icon shell) ; status_color="$C_SHELL" ;;
+    3) status_word="idle"    ; glyph_plain=$(status_icon idle)    ; status_color="$C_IDLE"  ;;
+    5) status_word="dormant — press Enter to resume (claude --resume)" ; glyph_plain=$(status_icon dormant) ; status_color="$C_DIM"  ;;
+    *) status_word="unknown" ; glyph_plain=$(status_icon)         ; status_color="$C_RESET" ;;
   esac
 
   local slug tf model_id preview_usage_line
@@ -558,10 +560,23 @@ preview_session() {
 
   if [[ -f "$tf" ]]; then
     echo "── transcript tail ──"
-    tail -r "$tf" 2>/dev/null | head -30 | jq -r '
-      if .type then
-        "\(.role // .type): \(.message.content // .content // "" | if type=="array" then (.[0].text // "") else . end | .[0:200])"
-      else empty end
+    # Newest-first, last ~12 REAL user/assistant text messages. Confirmed
+    # entry shapes: type=="user" content is a string OR an array whose
+    # blocks may be tool_result (no text, skipped); type=="assistant"
+    # content is an array whose first text block may follow thinking/
+    # tool_use blocks. Junk entries (message==null: attachment,
+    # custom-title, file-history-snapshot, last-prompt, mode,
+    # permission-mode, system) are filtered by the type select. head -12
+    # closes the pipe early (SIGPIPE upstream), so this avoids a full-file
+    # forward scan despite no line-count pre-limit.
+    tail -r "$tf" 2>/dev/null | jq -r '
+      select(.type=="user" or .type=="assistant")
+      | .message.content as $c
+      | ( if   ($c|type)=="string" then $c
+          elif ($c|type)=="array"  then ([ $c[] | select(.type=="text") | .text ] | first)
+          else empty end ) as $t
+      | select($t != null and ($t|type=="string") and ($t|length) > 0)
+      | "\(.type): \($t[0:200])"
     ' 2>/dev/null | head -12 || true
   fi
 }
@@ -617,9 +632,19 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 # per D-GAUGE), hence 4 not 3 cols.
 # │ separators mirror disp/nzdisp exactly (between MODEL|PROJECT, PROJECT|TARGET, TARGET|LAST).
 printf -v COLHDR '%-4s%-4s %-10s │ %-20s │ %-20s │ %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
-# D-CHROME.2: one-line legend (glyph key only) + COLHDR. Sort/key hints moved
-# to --prompt below, freeing the second legend line.
-HEADER=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\n'$'\033[2m'"${COLHDR}"$'\033[0m'
+# D-CHROME.2 / B (restored key legend): three-line header — icon legend
+# (status_icon glyphs, each colored with its status hue), a NEW key legend
+# line (dim, existing C_DIM palette var — no new colors) naming every
+# s/c/t/p/x/r/Enter action, then the dim COLHDR. --prompt below stays short;
+# the authoritative key reference now lives here.
+printf -v HDR_ICONS '%s%s%s wait   %s%s%s busy   %s%s%s bg-shell   %s%s%s idle   %s%s%s resume' \
+  "$C_WAIT" "$(status_icon waiting)" "$C_RESET" \
+  "$C_BUSY" "$(status_icon busy)" "$C_RESET" \
+  "$C_SHELL" "$(status_icon shell)" "$C_RESET" \
+  "$C_IDLE" "$(status_icon idle)" "$C_RESET" \
+  "$C_DIM" "$(status_icon dormant)" "$C_RESET"
+HDR_KEYS="${C_DIM}s sort:status  c sort:ctx%  t sort:time  p sort:project  x sleep  r refresh  Enter jump/resume${C_RESET}"
+HEADER="${HDR_ICONS}"$'\n'"${HDR_KEYS}"$'\n'"${C_DIM}${COLHDR}${C_RESET}"
 
 # D-CHROME.1: live (non-dormant) session count for the border label. Sort key
 # (field 6) != 5 means not-dormant. Reload (r/s/c/t/p/x binds) doesn't re-fire
@@ -642,7 +667,7 @@ sel=$(
         --border-label-pos=2 \
         --color="fg:-1,bg:-1,hl:${HL},fg+:${FGP},bg+:${BGP},hl+:${HLP},header:${HDR},info:${INFO},pointer:${PTR},prompt:${PROMPT},border:${BORDER},label:${LABEL},gutter:-1" \
         --pointer='▶' \
-        --prompt='[s/c/t/p·x] filter ▸ ' \
+        --prompt='filter ▸ ' \
         --info=inline \
         --header="$HEADER" \
         --preview="\"$SCRIPT_PATH\" --preview {}" \
