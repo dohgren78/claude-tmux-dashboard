@@ -4,20 +4,24 @@ A read-only [fzf](https://github.com/junegunn/fzf) popup that lists every **live
 
 Built for running many Claude Code sessions in parallel (one project per tmux session) where `tmux ls` alone doesn't tell you which one needs attention.
 
-```
-╭─ claude-dash · 9 sessions ───────────────────────────────────────────────────╮
-│  wait    busy    bg-shell    idle    resume                                   │
-│ s status  c ctx%  t time  p proj   x sleep  r refresh  ⏎ jump/resume          │
-│    CTX% MODEL      │ PROJECT              │ TARGET               │ LAST         │
-│ ▶  ▁ 14% Opus 4.8  │ GrapplingTracks      │ daily-porrada:1.1    │ 44s         │
-│   ▃ 41% Opus 4.8  │ whispa               │ whispa:1.1           │ 2m          │
-│   ▇ 88% Sonnet 5  │ homelab-fixes        │ homelab-omada:1.1    │ 5s          │
-│   ▁ 6%  Haiku     │ dev-env-optimization │ dev-env-fixes:1.1    │ 1h          │
-│   z  -   -         │ media-creation       │ (resume)             │ 1d          │
-╰───────────────────────────────────────────────────────────────────────────────╯
+```text
+ claude-dash · 9 sessions
+────────────────────────────────────────────────────────────────────────────
+ ? wait   > busy   & bg-shell   . idle   z resume
+ s status   c ctx%   t time   p proj   x sleep   r refresh   ↵ jump/resume
+
+     CTX% MODEL    │ PROJECT              │ TARGET             │ LAST
+ > ▁ 14%  Opus 4.8 │ GrapplingTracks      │ daily-porrada:1.1  │ 44s
+ . ▃ 41%  Opus 4.8 │ whispa               │ whispa:1.1         │ 2m
+ > ▇ 88%  Sonnet 5 │ homelab-fixes        │ homelab-omada:1.1  │ 5s
+ . ▁ 6%   Haiku    │ dev-env-optimization │ dev-env-fixes:1.1  │ 1h
+ z   -    -        │ media-creation       │ (resume)           │ 1d
+────────────────────────────────────────────────────────────────────────────
 ```
 
-Live sessions on top (jump with Enter), parked ones (`z`) below (Enter resumes the exact conversation, `x` sleeps a live one). The status glyph, CTX% gauge, and MODEL are colour-coded; the whole row dims when idle so the active ones stand out.
+> The status column (`?` `>` `&` `.` `z` above) is shown here as ASCII so it renders anywhere. **In the terminal these are colour-coded [Nerd Font](https://www.nerdfonts.com/) icons** — a spinner for busy, a folder-shell for bg-shell, a dot for idle, and so on — and the CTX% gauge (`▁▃▅▇`) is graded green → amber → red. See [Install](#install) for the font.
+
+Live sessions on top (jump with Enter), parked ones (`z`) below (Enter resumes the exact conversation, `x` sleeps a live one). The status icon, CTX% gauge, and MODEL are colour-coded, and the whole row dims when idle so the active ones stand out.
 
 ## Install
 
@@ -49,11 +53,11 @@ Because `s`/`c`/`t`/`p`/`x` are action keys they don't type-to-filter the fzf qu
 
 ## Columns
 
-- **STAT** — live status read straight from each session's state file, shown as a coloured icon:
-  - **waiting** on you (input / permission prompt) — the one to look at first
-  - busy (Claude working)
-  - **bg-shell** — live session with a background shell running (Claude reports `status: "shell"`)
-  - idle
+- **STAT** — live status read straight from each session's state file, shown as a colour-coded [Nerd Font](https://www.nerdfonts.com/) icon (ASCII stand-in in parentheses, as used in the mockup above):
+  - `?` **waiting** on you (input / permission prompt) — the one to look at first
+  - `>` **busy** (Claude working)
+  - `&` **bg-shell** — live session with a background shell running (Claude reports `status: "shell"`)
+  - `.` **idle**
   - `z` **dormant** — a session you slept with `x`. Listed below the live ones; **Enter resumes that exact conversation** (`claude --resume <sessionId>`).
 - **CTX%** — context-window fill as a colour-graded gauge bar (`▁▃▅▇`, green → amber → red) plus the number. Window-aware (÷200k, or ÷1M for 1M-window models), capped at 99%. Read from the transcript's last **main-chain** token-usage record (sub-agent usage lines are skipped so a spawned Haiku/other-model agent can't mislabel the session).
 - **MODEL** — the active model (e.g. `Opus 4.8`, `Sonnet 5`, `Haiku`, `Fable 5`), derived from the session's transcript.
