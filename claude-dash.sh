@@ -87,15 +87,34 @@ mainchain_usage_line() {
     | head -1 || true
 }
 
+# Resolve a transcript jsonl path for a given cwd + id. Exact match first
+# (id == full sessionId, the common case). Falls back to a prefix glob when
+# id is a short daemon jobId that is only the LEADING segment of the
+# transcript's full UUID filename — confirmed live: bg job jobId "a8e0cf07"
+# resolves to transcript "a8e0cf07-cf17-....jsonl", NOT literally
+# "a8e0cf07.jsonl" (the socket IS named exactly by the short jobId; the
+# transcript filename is not). Echoes the path if found, empty otherwise.
+transcript_file() {
+  local cwd="$1" id="$2"
+  local slug tf cand
+  slug="${cwd//\//-}"
+  tf="$PROJECTS_DIR/$slug/$id.jsonl"
+  if [[ -f "$tf" ]]; then
+    echo "$tf"
+    return 0
+  fi
+  cand=$(ls "$PROJECTS_DIR/$slug/$id"*.jsonl 2>/dev/null | head -1) || true
+  echo "${cand:-}"
+}
+
 # Context % from transcript jsonl. Echoes "<pct>%<TAB><raw-model-id>" (model id
 # is the raw id, NOT the label — model_label() maps it downstream).
 # Usage: context_pct <cwd> <sessionId>
 context_pct() {
   local cwd="$1" sid="$2"
-  local slug tf usage_line model total window pct
-  slug="${cwd//\//-}"
-  tf="$PROJECTS_DIR/$slug/$sid.jsonl"
-  if [[ ! -f "$tf" ]]; then
+  local tf usage_line model total window pct
+  tf=$(transcript_file "$cwd" "$sid")
+  if [[ -z "$tf" || ! -f "$tf" ]]; then
     printf '%s\t%s\n' "-" ""
     return 0
   fi
@@ -133,10 +152,9 @@ context_pct() {
 # Mtime of transcript jsonl in epoch seconds (fall back to 0).
 transcript_mtime() {
   local cwd="$1" sid="$2"
-  local slug tf result
-  slug="${cwd//\//-}"
-  tf="$PROJECTS_DIR/$slug/$sid.jsonl"
-  if [[ -f "$tf" ]]; then
+  local tf result
+  tf=$(transcript_file "$cwd" "$sid")
+  if [[ -n "$tf" && -f "$tf" ]]; then
     result=$(stat -f %m "$tf" 2>/dev/null || true)
     echo "${result:-0}"
   else
@@ -151,16 +169,18 @@ pane_lookup() {
   awk -F'|' -v key="$tty" '$1==key {print $2"|"$3"|"$4; exit}' "$mapfile"
 }
 
-# bg_instance: given a bg job's sessionId, return the daemon <inst> dir name
-# that owns its pty socket. The socket is named after the daemon's short
-# jobId, which is the sessionId's first UUID segment (confirmed live:
-# jobId "a8e0cf07" == sessionId "a8e0cf07-cf17-..." prefix) — NOT the full
-# sessionId. /tmp/cc-daemon-$(id -u)/<inst>/pty/<jobId>.sock. Returns "" if
-# none found. Relies on nullglob already being set by the caller.
+# bg_instance: given a bg job's jobId (jq `.jobId` from the session json —
+# the sessionId has been observed to diverge from the jobId on current CC
+# builds, so it is NOT derived from the sessionId), return the daemon <inst>
+# dir name that owns its pty/rv socket. Both pty (active job) and rv (spare)
+# subdirs are globbed so a spare's socket is still discoverable.
+# /tmp/cc-daemon-$(id -u)/<inst>/{pty,rv}/<jobId>.sock. Returns "" if none
+# found. Relies on nullglob already being set by the caller.
 bg_instance() {
-  local short="${1%%-*}" sock
-  for sock in /tmp/cc-daemon-"$(id -u)"/*/pty/"$short".sock; do
+  local sock
+  for sock in /tmp/cc-daemon-"$(id -u)"/*/pty/"$1".sock /tmp/cc-daemon-"$(id -u)"/*/rv/"$1".sock; do
     sock="${sock%/pty/*}"
+    sock="${sock%/rv/*}"
     echo "${sock##*/}"
     return 0
   done
@@ -170,9 +190,14 @@ bg_instance() {
 #   1=glyph_disp 2=ctx_pct 3=proj 4=tmux_target 5=act_str 6=sortkey
 #   7=jump_target 8=waiting_for 9=pid 10=cwd 11=sid 12=act_epoch 13=display
 # Merged and single rows BOTH go through here — single source of the field
-# contract. args: sid cwd pid status waiting_for updated_at tmux_target jump_target
+# contract. args: sid cwd pid status waiting_for updated_at tmux_target jump_target [xscript_id]
+# xscript_id (9th arg, optional) is the id used to resolve the transcript
+# jsonl for context%/mtime — defaults to sid. bg rows pass the daemon jobId
+# here (transcript is jobId-named), while field 11 (sid) always stays the
+# REAL resumable sessionId regardless of xscript_id.
 build_row() {
   local sid="$1" cwd="$2" pid="$3" sess_status="$4" waiting_for="$5" updated_at="$6" tmux_target="$7" jump_target="$8"
+  local xscript_id="${9:-$sid}"
 
   # Status glyph + sort key + color (ASCII glyphs, ANSI color — no emojis).
   # rowcolor tints the WHOLE display row (D-ROWCOLOR): active states brighter,
@@ -189,13 +214,13 @@ build_row() {
 
   # Context % + model label
   local ctx_pct model_id model_lbl
-  IFS=$'\t' read -r ctx_pct model_id < <(context_pct "$cwd" "$sid" || true)
+  IFS=$'\t' read -r ctx_pct model_id < <(context_pct "$cwd" "$xscript_id" || true)
   ctx_pct="${ctx_pct:--}"
   model_lbl=$(model_label "$model_id")
 
   # Last activity: prefer transcript mtime, fall back to updatedAt epoch ms
   local tmtime act_epoch act_str
-  tmtime=$(transcript_mtime "$cwd" "$sid" || true)
+  tmtime=$(transcript_mtime "$cwd" "$xscript_id" || true)
   tmtime="${tmtime:-0}"
   if [[ "$tmtime" != "0" ]]; then
     act_epoch="$tmtime"
@@ -274,10 +299,10 @@ enumerate_sessions() {
     # Parse all fields in one jq call, including daemon `kind` (defaults to
     # "interactive" for pre-daemon session json that predates this field).
     local fields
-    fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0), (.kind // "interactive")] | @tsv' "$f" 2>/dev/null) || continue
+    fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0), (.kind // "interactive"), (.jobId // "")] | @tsv' "$f" 2>/dev/null) || continue
 
-    local pid sess_status waiting_for cwd sid updated_at kind
-    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind <<< "$fields"
+    local pid sess_status waiting_for cwd sid updated_at kind jobid
+    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind jobid <<< "$fields"
 
     [[ -z "$pid" ]] && continue
 
@@ -313,7 +338,7 @@ enumerate_sessions() {
     # Instance correlation (see .kind read + correlation_assumption).
     local instance
     if [[ "$kind" == "bg" ]]; then
-      instance=$(bg_instance "$sid")
+      instance=$(bg_instance "$jobid")
     else
       # Interactive session json carries no instance/daemon-id field in
       # 2.1.202 (confirmed against a live interactive record) — fall back
@@ -331,8 +356,8 @@ enumerate_sessions() {
     # placeholder for "no value" (see tmux_target/jump_target above).
     instance="${instance:--}"
 
-    records+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
-      "$kind" "$sid" "$pid" "$cwd" "$instance" "$sess_status" "$waiting_for" "$updated_at" "$tmux_target" "$jump_target")")
+    records+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      "$kind" "$sid" "$pid" "$cwd" "$instance" "$sess_status" "$waiting_for" "$updated_at" "$tmux_target" "$jump_target" "$jobid")")
   done
 
   # DAEMON-MERGE: correlate bg jobs with interactive clients into ONE logical
@@ -341,13 +366,13 @@ enumerate_sessions() {
   # tab-record once into parallel indexed arrays, then correlate by linear
   # scan. The fleet this runs against is a handful of sessions, so O(n^2) is
   # cheap and keeps this bash-3.2-safe without reaching for `declare -A`.
-  local -a R_KIND=() R_SID=() R_PID=() R_CWD=() R_INSTANCE=() R_STATUS=() R_WAITING=() R_UPDATED=() R_TMUX=() R_JUMP=()
-  local rec rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump
+  local -a R_KIND=() R_SID=() R_PID=() R_CWD=() R_INSTANCE=() R_STATUS=() R_WAITING=() R_UPDATED=() R_TMUX=() R_JUMP=() R_JOBID=()
+  local rec rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump rjobid
   for rec in "${records[@]}"; do
-    IFS=$'\t' read -r rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump <<< "$rec"
+    IFS=$'\t' read -r rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump rjobid <<< "$rec"
     R_KIND+=("$rk"); R_SID+=("$rsid"); R_PID+=("$rpid"); R_CWD+=("$rcwd")
     R_INSTANCE+=("$rinstance"); R_STATUS+=("$rstatus"); R_WAITING+=("$rwaiting")
-    R_UPDATED+=("$rupdated"); R_TMUX+=("$rtmux"); R_JUMP+=("$rjump")
+    R_UPDATED+=("$rupdated"); R_TMUX+=("$rtmux"); R_JUMP+=("$rjump"); R_JOBID+=("$rjobid")
   done
 
   local n=${#R_KIND[@]}
@@ -380,13 +405,15 @@ enumerate_sessions() {
       # interactive client contributes the tmux pane it owns (Enter jumps
       # there, since only the interactive client has a controlling tty).
       row=$(build_row "${R_SID[$bi]}" "${R_CWD[$bi]}" "${R_PID[$bi]}" "${R_STATUS[$bi]}" \
-                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "${R_TMUX[$match_ij]}" "${R_JUMP[$match_ij]}")
+                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "${R_TMUX[$match_ij]}" "${R_JUMP[$match_ij]}" \
+                       "${R_JOBID[$bi]}")
       consumed_interactive="${consumed_interactive}${match_ij}|"
     else
       # No interactive partner, or ambiguous (≥2 bg siblings) → standalone,
       # non-jumpable row. A bg job has no controlling tty of its own.
       row=$(build_row "${R_SID[$bi]}" "${R_CWD[$bi]}" "${R_PID[$bi]}" "${R_STATUS[$bi]}" \
-                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "detached" "-")
+                       "${R_WAITING[$bi]}" "${R_UPDATED[$bi]}" "detached" "-" \
+                       "${R_JOBID[$bi]}")
     fi
     rows="${rows}${row}
 "
@@ -464,21 +491,29 @@ preview_session() {
 
   local slug tf model_id preview_usage_line
   slug="${cwd//\//-}"
-  tf="$PROJECTS_DIR/$slug/$sid.jsonl"
+  tf=$(transcript_file "$cwd" "$sid")
+
+  # DAEMON-MERGE enrichment: field 11 (sid) / field 9 (pid) on a merged row
+  # are the BG job's own — surface its daemon job name (session json is keyed
+  # by pid, not sid). No field-count change; read-only lookup. Also read
+  # .jobId here: bg rows resolve their transcript by jobId (socket + jsonl
+  # are jobId-prefixed, not sessionId-named — sessionId can diverge from
+  # jobId on current CC builds), so recompute tf BEFORE the model-id read.
+  local job_name="" job_kind="" job_id=""
+  if [[ -f "$SESSIONS_DIR/$pid.json" ]]; then
+    IFS=$'\t' read -r job_name job_kind job_id < <(jq -r '[(.name // ""), (.kind // ""), (.jobId // "")] | @tsv' "$SESSIONS_DIR/$pid.json" 2>/dev/null)
+    [[ "$job_kind" == "bg" ]] || job_name=""
+  fi
+  if [[ "$job_kind" == "bg" && -n "$job_id" ]]; then
+    tf=$(transcript_file "$cwd" "$job_id")
+  fi
+
   model_id=""
   if [[ -f "$tf" ]]; then
     preview_usage_line=$(mainchain_usage_line "$tf")
     if [[ -n "$preview_usage_line" ]]; then
       model_id=$(printf '%s\n' "$preview_usage_line" | jq -r '.message.model // ""' 2>/dev/null)
     fi
-  fi
-
-  # DAEMON-MERGE enrichment: field 11 (sid) / field 9 (pid) on a merged row
-  # are the BG job's own — surface its daemon job name (session json is keyed
-  # by pid, not sid). No field-count change; read-only lookup.
-  local job_name=""
-  if [[ -f "$SESSIONS_DIR/$pid.json" ]]; then
-    job_name=$(jq -r 'if (.kind=="bg") then (.name // "") else "" end' "$SESSIONS_DIR/$pid.json" 2>/dev/null)
   fi
 
   # D-PREVIEW: grouped identity / state blocks, rules between, color-matched
@@ -534,7 +569,7 @@ kill_session() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session
+export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_file transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
