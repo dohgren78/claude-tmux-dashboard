@@ -634,6 +634,157 @@ kill_session() {
   else printf ' could not sleep %s ' "$sess"; fi
 }
 
+# doctor_check: READ-ONLY diagnostic against the LIVE session set. Mirrors
+# enumerate PASS-1 liveness logic (pid alive via `ps -p`, skip --bg-spare on
+# cmdline). Never mutates anything (no tmux new/kill/send-keys, no writes
+# beyond the pre-existing TTY_MAP_FILE the top-level pane-map build already
+# created). Prints one line per check plus a `PASS:n WARN:n FAIL:n` summary.
+doctor_check() {
+  local GRN=$'\033[1;32m'
+  local pass_n=0 warn_n=0 fail_n=0
+  _pass() { pass_n=$((pass_n+1)); printf '%s✓%s %s\n' "$GRN" "$C_RESET" "$1"; }
+  _warn() { warn_n=$((warn_n+1)); printf '%s!%s %s\n' "$C_BUSY" "$C_RESET" "$1"; }
+  _fail() { fail_n=$((fail_n+1)); printf '%s✗%s %s\n' "$C_WAIT" "$C_RESET" "$1"; }
+
+  echo "── claude-dash --doctor (read-only) ──"
+  shopt -s nullglob
+
+  # Collect live, non-spare records — same PASS-1 filter as enumerate_sessions.
+  local -a D_KIND=() D_SID=() D_PID=() D_CWD=() D_JOBID=() D_JSON=()
+  local f fields pid sess_status waiting_for cwd sid updated_at kind jobid cmdline
+  for f in "$SESSIONS_DIR"/*.json; do
+    [[ -f "$f" ]] || continue
+    fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0), (.kind // "interactive"), (.jobId // "")] | @tsv' "$f" 2>/dev/null) || continue
+    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind jobid <<< "$fields"
+    [[ -z "$pid" ]] && continue
+    ps -p "$pid" -o pid= >/dev/null 2>&1 || continue
+    cmdline=$(ps -o command= -p "$pid" 2>/dev/null || true)
+    [[ "$cmdline" == *--bg-spare* ]] && continue
+    D_KIND+=("$kind"); D_SID+=("$sid"); D_PID+=("$pid"); D_CWD+=("$cwd"); D_JOBID+=("$jobid"); D_JSON+=("$f")
+  done
+
+  # 1. CC version — read off a live session json; fall back to `claude --version`.
+  local cc_version=""
+  if [[ ${#D_JSON[@]} -gt 0 ]]; then
+    cc_version=$(jq -r '.version // empty' "${D_JSON[0]}" 2>/dev/null) || true
+  fi
+  [[ -z "$cc_version" ]] && { cc_version=$(claude --version 2>/dev/null | head -1) || true; }
+  if [[ -n "$cc_version" ]]; then
+    _pass "CC version: $cc_version (assumptions validated against 2.1.202)"
+  else
+    _warn "CC version: could not determine (assumptions validated against 2.1.202)"
+  fi
+
+  # 2. Daemon instance dir(s) — exactly 1 expected; >1 ambiguates the
+  # interactive->bg instance fallback used by DAEMON-MERGE.
+  local -a inst_dirs=()
+  local _d
+  for _d in /tmp/cc-daemon-"$(id -u)"/*/; do
+    _d="${_d%/}"
+    inst_dirs+=("${_d##*/}")
+  done
+  if [[ ${#inst_dirs[@]} -eq 1 ]]; then
+    _pass "Daemon instance dir(s): 1 (${inst_dirs[0]})"
+  else
+    _warn "Daemon instance dir(s): ${#inst_dirs[@]} (0 = no daemon running; >1 ambiguates interactive->bg fallback correlation)"
+  fi
+
+  # 3. Per live kind==bg: jobId present? socket resolvable? transcript resolvable?
+  local i any_bg=0
+  for (( i=0; i<${#D_KIND[@]}; i++ )); do
+    [[ "${D_KIND[$i]}" == "bg" ]] || continue
+    any_bg=1
+    local bjob="${D_JOBID[$i]}" bcwd="${D_CWD[$i]}" bmiss=""
+    if [[ -z "$bjob" ]]; then
+      _fail "bg pid ${D_PID[$i]}: jobId MISSING"
+      continue
+    fi
+    local bsock="" _s
+    for _s in /tmp/cc-daemon-"$(id -u)"/*/pty/"$bjob"*.sock; do [[ -e "$_s" ]] && bsock=1 && break; done
+    [[ -z "$bsock" ]] && bmiss="socket"
+    local btf
+    btf=$(transcript_file "$bcwd" "$bjob")
+    [[ -z "$btf" ]] && bmiss="${bmiss:+$bmiss, }transcript"
+    if [[ -n "$bmiss" ]]; then
+      _fail "bg $bjob: $bmiss MISSING"
+    else
+      _pass "bg $bjob: jobId + socket + transcript resolved"
+    fi
+  done
+  [[ "$any_bg" -eq 0 ]] && _pass "bg jobs: none live (nothing to check)"
+
+  # 4. Per live kind==interactive: tty resolvable to a tmux pane?
+  local any_ia=0
+  for (( i=0; i<${#D_KIND[@]}; i++ )); do
+    [[ "${D_KIND[$i]}" == "interactive" ]] || continue
+    any_ia=1
+    local raw_tty tty pane_info
+    raw_tty=$(ps -o tty= -p "${D_PID[$i]}" 2>/dev/null | tr -d ' ') || raw_tty=""
+    tty="${raw_tty##*/}"
+    pane_info=$(pane_lookup "$tty" "$TTY_MAP_FILE")
+    if [[ -n "$pane_info" ]]; then
+      _pass "interactive pid ${D_PID[$i]} (tty $tty): pane resolved ($pane_info)"
+    else
+      _fail "interactive pid ${D_PID[$i]} (tty $tty): pane NOT resolved"
+    fi
+  done
+  [[ "$any_ia" -eq 0 ]] && _pass "interactive sessions: none live (nothing to check)"
+
+  # 5. Merge sanity — tally DAEMON-MERGE target-marker outcomes among bg rows
+  # (bg_total from check 3) against a live enumerate pass. Ideal: every bg
+  # job with exactly one same-key interactive merges 1:1 (merged==bg_total).
+  local bg_total=0
+  for (( i=0; i<${#D_KIND[@]}; i++ )); do [[ "${D_KIND[$i]}" == "bg" ]] && bg_total=$((bg_total+1)); done
+  local list_out t4_col detached=0 unlinked=0 ambiguous=0 merged=0
+  list_out=$(enumerate_sessions status) || true
+  t4_col=$(printf '%s\n' "$list_out" | cut -f4)
+  detached=$(printf '%s\n' "$t4_col" | grep -cx 'detached' || true)
+  unlinked=$(printf '%s\n' "$t4_col" | grep -cx 'unlinked?' || true)
+  ambiguous=$(printf '%s\n' "$t4_col" | grep -cx 'ambiguous?' || true)
+  merged=$(( bg_total - detached - unlinked - ambiguous ))
+  (( merged < 0 )) && merged=0
+  if [[ "$unlinked" -gt 0 ]]; then
+    _fail "merge tally: bg_total=$bg_total merged=$merged detached=$detached unlinked?=$unlinked ambiguous?=$ambiguous"
+  elif [[ "$ambiguous" -gt 0 ]]; then
+    _warn "merge tally: bg_total=$bg_total merged=$merged detached=$detached unlinked?=$unlinked ambiguous?=$ambiguous"
+  else
+    _pass "merge tally: bg_total=$bg_total merged=$merged detached=$detached unlinked?=$unlinked ambiguous?=$ambiguous"
+  fi
+
+  # 6. Session-json schema probe — kind/sessionId present on any live sample;
+  # jobId is only checked on a kind==bg sample — by design, interactive
+  # session json carries no jobId key at all (confirmed against a live
+  # interactive record), so requiring it there would be a false FAIL, not a
+  # real schema break. Prefer a bg sample when one is live so all three
+  # fields (the class that broke in un0/f5v) get checked in one pass.
+  if [[ ${#D_JSON[@]} -gt 0 ]]; then
+    local sample="" si
+    for (( si=0; si<${#D_KIND[@]}; si++ )); do
+      if [[ "${D_KIND[$si]}" == "bg" ]]; then sample="${D_JSON[$si]}"; break; fi
+    done
+    [[ -z "$sample" ]] && sample="${D_JSON[0]}"
+    local sample_kind missing_fields="" has_kind has_jobid has_sid
+    sample_kind=$(jq -r '.kind // "interactive"' "$sample" 2>/dev/null) || true
+    has_kind=$(jq -r 'has("kind")' "$sample" 2>/dev/null) || true
+    has_sid=$(jq -r 'has("sessionId")' "$sample" 2>/dev/null) || true
+    [[ "$has_kind" != "true" ]] && missing_fields="${missing_fields}kind "
+    [[ "$has_sid" != "true" ]] && missing_fields="${missing_fields}sessionId "
+    if [[ "$sample_kind" == "bg" ]]; then
+      has_jobid=$(jq -r 'has("jobId")' "$sample" 2>/dev/null) || true
+      [[ "$has_jobid" != "true" ]] && missing_fields="${missing_fields}jobId "
+    fi
+    if [[ -n "$missing_fields" ]]; then
+      _fail "session-json schema: missing field(s): $missing_fields(sample: $(basename "$sample"), kind=$sample_kind)"
+    else
+      _pass "session-json schema: kind/sessionId$([[ "$sample_kind" == "bg" ]] && echo "/jobId") present (sample: $(basename "$sample"), kind=$sample_kind)"
+    fi
+  else
+    _warn "session-json schema: no live session json to sample"
+  fi
+
+  echo "── PASS:$pass_n WARN:$warn_n FAIL:$fail_n ──"
+}
+
 # ── responsive header ────────────────────────────────────────────────────────
 
 # pack_groups: GROUP_VIS[i] / GROUP_REND[i] are parallel arrays — VIS is the
@@ -707,7 +858,7 @@ build_header() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_file transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session
+export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_file transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session doctor_check build_header pack_groups
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -728,6 +879,11 @@ fi
 if [[ "${1:-}" == "--print-header" ]]; then
   build_header
   printf '%s\n' "$HEADER"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--doctor" ]]; then
+  doctor_check
   exit 0
 fi
 
