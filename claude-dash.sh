@@ -9,6 +9,19 @@ SESSIONS_DIR="$HOME/.claude/sessions"
 PROJECTS_DIR="$HOME/.claude/projects"
 NAMES_FILE="$HOME/.claude/.claude-dash-slept"   # sessionId<TAB>tmux-name<TAB>cwd, written on sleep
 
+# ── palette (hoisted for future theming; blue/amber family, NOT a re-theme) ──
+
+# fzf chrome hex scheme (was inline on the --color arg)
+HL='#ffaf5f'; FGP='#ffffff'; BGP='#262626'; HLP='#ffd75f'; HDR='#87afaf'
+INFO='#6c6c6c'; PTR='#ff5f5f'; PROMPT='#5fafd7'; BORDER='#5f87af'; LABEL='#afd7ff'
+
+# Status/ANSI codes. Row color (C_*_ROW) is non-bold so a full waiting/busy
+# row reads brighter than idle without being eye-searing; glyph keeps its own
+# bolder hue (see build_row). Idle tuned a touch dimmer than shell for contrast.
+C_WAIT=$'\033[1;31m'; C_BUSY=$'\033[1;33m'; C_SHELL=$'\033[1;36m'
+C_IDLE=$'\033[2;37m'; C_DIM=$'\033[2m'; C_RESET=$'\033[0m'
+C_WAIT_ROW=$'\033[31m'; C_BUSY_ROW=$'\033[33m'; C_SHELL_ROW=$'\033[36m'; C_IDLE_ROW=$'\033[2;37m'
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 # Human-friendly elapsed time from epoch seconds.
@@ -20,6 +33,26 @@ elapsed_human() {
   elif (( delta < 3600 ));  then echo "$(( delta / 60 ))m"
   elif (( delta < 86400 )); then echo "$(( delta / 3600 ))h"
   else                           echo "$(( delta / 86400 ))d"
+  fi
+}
+
+# CTX gauge: raw ctx_pct string ("19%" or "-") → a single color-graded
+# box-drawing block char, wrapped in its own color+reset. DISPLAY-ONLY — the
+# caller must never feed this into data field 2 (raw ctx_pct stays numeric).
+# Bins: <25 green ▁ · 25-50 green/amber ▃ · 50-75 amber ▅ · >75 red ▇ (near
+# compaction). Non-numeric ("-", empty) → a single blank (no color), so the
+# gauge column still aligns for dormant/no-data rows.
+ctx_gauge() {
+  local raw="${1:-}" n
+  n="${raw%\%}"
+  if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+    echo " "
+    return 0
+  fi
+  if   (( n < 25 )); then echo $'\033[32m'"▁"$'\033[0m'
+  elif (( n < 50 )); then echo $'\033[32m'"▃"$'\033[0m'
+  elif (( n < 75 )); then echo $'\033[33m'"▅"$'\033[0m'
+  else                    echo $'\033[31m'"▇"$'\033[0m'
   fi
 }
 
@@ -141,14 +174,16 @@ bg_instance() {
 build_row() {
   local sid="$1" cwd="$2" pid="$3" sess_status="$4" waiting_for="$5" updated_at="$6" tmux_target="$7" jump_target="$8"
 
-  # Status glyph + sort key + color (ASCII glyphs, ANSI color — no emojis)
-  local glyph sortkey gcolor
+  # Status glyph + sort key + color (ASCII glyphs, ANSI color — no emojis).
+  # rowcolor tints the WHOLE display row (D-ROWCOLOR): active states brighter,
+  # idle dimmer; glyph keeps its own (bolder) hue via gcolor.
+  local glyph sortkey gcolor rowcolor
   case "$sess_status" in
-    waiting) glyph="?" ; sortkey=0 ; gcolor=$'\033[1;31m' ;;  # bold red
-    busy)    glyph=">" ; sortkey=1 ; gcolor=$'\033[1;33m' ;;  # bold yellow
-    shell)   glyph="&" ; sortkey=2 ; gcolor=$'\033[1;36m' ;;  # cyan — live, has a background shell
-    idle)    glyph="." ; sortkey=3 ; gcolor=$'\033[2;37m' ;;  # dim
-    *)       glyph="?" ; sortkey=4 ; gcolor=$'\033[0m'    ;;
+    waiting) glyph="?" ; sortkey=0 ; gcolor="$C_WAIT"  ; rowcolor="$C_WAIT_ROW"  ;;
+    busy)    glyph=">" ; sortkey=1 ; gcolor="$C_BUSY"  ; rowcolor="$C_BUSY_ROW"  ;;
+    shell)   glyph="&" ; sortkey=2 ; gcolor="$C_SHELL" ; rowcolor="$C_SHELL_ROW" ;;  # live, has a background shell
+    idle)    glyph="." ; sortkey=3 ; gcolor="$C_IDLE"  ; rowcolor="$C_IDLE_ROW"  ;;
+    *)       glyph="?" ; sortkey=4 ; gcolor="$C_RESET" ; rowcolor=""             ;;
   esac
   local glyph_disp="${gcolor}${glyph}"$'\033[0m'
 
@@ -174,15 +209,24 @@ build_row() {
   local proj="${cwd:-unknown}"
   proj="${proj##*/}"
 
-  # Padded display column (field 13). ANSI lives only in the glyph, so the
-  # plain columns pad to fixed widths and actually line up. fzf shows field 13.
+  # Padded display column (field 13). NO ANSI inside disp itself — ANSI
+  # corrupts %-Ns width math. Dim │ separators between MODEL|PROJECT,
+  # PROJECT|TARGET, TARGET|LAST are plain chars (1 col each, printf-safe).
+  # ANSI (gauge + row color) is composed OUTSIDE disp, same pattern as glyph.
   local disp
-  printf -v disp '%-4s %-10.10s %-20.20s %-20.20s %-4s' "$ctx_pct" "$model_lbl" "$proj" "$tmux_target" "$act_str"
+  printf -v disp '%-4s %-10.10s │ %-20.20s │ %-20.20s │ %-4s' \
+    "$ctx_pct" "$model_lbl" "$proj" "$tmux_target" "$act_str"
 
-  # Data fields 1-12 (sort/jump/preview, unchanged) + display field 13
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s %s\n' \
+  # CTX gauge token (display-only, field 13; ctx_pct in field 2 stays raw).
+  local gauge_tok
+  gauge_tok=$(ctx_gauge "$ctx_pct")
+  local disp_colored="${rowcolor}${disp}${C_RESET}"
+
+  # Data fields 1-12 (sort/jump/preview, unchanged) + display field 13.
+  # field 13 = "<glyph_disp> <gauge_tok><rowcolor><disp><reset>"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s %s%s\n' \
     "$glyph_disp" "$ctx_pct" "$proj" "$tmux_target" "$act_str" "$sortkey" \
-    "$jump_target" "$waiting_for" "$pid" "$cwd" "$sid" "$act_epoch" "$glyph_disp" "$disp"
+    "$jump_target" "$waiting_for" "$pid" "$cwd" "$sid" "$act_epoch" "$glyph_disp" "$gauge_tok" "$disp_colored"
 }
 
 # ── build tty→pane map ───────────────────────────────────────────────────────
@@ -375,8 +419,14 @@ enumerate_sessions() {
       nmt=$(stat -f %m "$ntf" 2>/dev/null || echo 0)
       ndact=$(elapsed_human "$nmt" 2>/dev/null || echo "-")
       [[ -n "$nname" ]] || nname="${ncwd##*/}"
-      printf -v nzdisp '%-4s %-10.10s %-20.20s %-20.20s %-4s' "-" "-" "$nname" "(resume)" "$ndact"
-      rows="${rows}"$'\033[2;37mz\033[0m'"	-	${nname}	(resume)	${ndact}	5	RESUME|${nsid}|${ncwd}	-	-	${ncwd}	${nsid}	${nmt}	"$'\033[2;37mz\033[0m'" ${nzdisp}
+      # Matching gauge-prefix + separators + row-dim as the live disp/rowcolor
+      # composition — ctx_gauge "-" returns a blank placeholder (no ANSI) so
+      # the gauge column still aligns.
+      local nzgauge nzdisp_colored
+      nzgauge=$(ctx_gauge "-")
+      printf -v nzdisp '%-4s %-10.10s │ %-20.20s │ %-20.20s │ %-4s' "-" "-" "$nname" "(resume)" "$ndact"
+      nzdisp_colored="${C_IDLE_ROW}${nzdisp}${C_RESET}"
+      rows="${rows}"$'\033[2;37mz\033[0m'"	-	${nname}	(resume)	${ndact}	5	RESUME|${nsid}|${ncwd}	-	-	${ncwd}	${nsid}	${nmt}	"$'\033[2;37mz\033[0m'" ${nzgauge}${nzdisp_colored}
 "
       dcount=$((dcount+1)); [[ $dcount -ge 20 ]] && break
     done < <(tail -r "$NAMES_FILE" 2>/dev/null)          # newest first
@@ -477,7 +527,7 @@ kill_session() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human context_pct model_label mainchain_usage_line transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session
+export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session
 export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -498,7 +548,11 @@ fi
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 # Column header padded to the same widths as the display field (see enumerate).
-printf -v COLHDR '%-2s%-4s %-10s %-20s %-20s %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
+# Leading %-3s accounts for the field-13 prefix: glyph(1)+space(1)+gauge(1) — the
+# gauge butts directly against the CTX% number in disp (no separating space, so
+# the gauge reads as "▁19%" per D-GAUGE), hence 3 not 4 cols.
+# │ separators mirror disp/nzdisp exactly (between MODEL|PROJECT, PROJECT|TARGET, TARGET|LAST).
+printf -v COLHDR '%-3s%-4s %-10s │ %-20s │ %-20s │ %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
 HEADER=$'\033[1;31m?\033[0m wait   \033[1;33m>\033[0m busy   \033[1;36m&\033[0m bg-shell   \033[2;37m.\033[0m idle   \033[2;37mz\033[0m resume\nsort: [s]tatus  [c]tx%  [t]ime  [p]roj    ·    [x]=sleep  r=refresh  Enter=jump/resume\n'$'\033[2m'"${COLHDR}"$'\033[0m'
 
 # fzf pipeline — Enter accepts and returns the selected line; jump happens
@@ -515,7 +569,7 @@ sel=$(
         --border=rounded \
         --border-label=' claude-dash · sessions ' \
         --border-label-pos=2 \
-        --color=fg:-1,bg:-1,hl:#ffaf5f,fg+:#ffffff,bg+:#262626,hl+:#ffd75f,header:#87afaf,info:#6c6c6c,pointer:#ff5f5f,prompt:#5fafd7,border:#5f87af,label:#afd7ff,gutter:-1 \
+        --color="fg:-1,bg:-1,hl:${HL},fg+:${FGP},bg+:${BGP},hl+:${HLP},header:${HDR},info:${INFO},pointer:${PTR},prompt:${PROMPT},border:${BORDER},label:${LABEL},gutter:-1" \
         --pointer='▶' \
         --prompt='filter ▸ ' \
         --info=inline \
