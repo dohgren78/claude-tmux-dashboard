@@ -604,6 +604,77 @@ kill_session() {
   else printf ' could not sleep %s ' "$sess"; fi
 }
 
+# ── responsive header ────────────────────────────────────────────────────────
+
+# pack_groups: GROUP_VIS[i] / GROUP_REND[i] are parallel arrays — VIS is the
+# plain (no-ANSI) text used for width math, REND is the ANSI-colored text
+# actually emitted. Greedily packs groups into lines <= $cols (visible width),
+# joining with a 3-space separator; a line break happens BEFORE a group that
+# would overflow (never mid-group, never truncated). Echoes the packed block.
+pack_groups() {
+  local sep="   " out="" cur="" cur_vis=0 i gvis grend newvis
+  for (( i=0; i<${#GROUP_VIS[@]}; i++ )); do
+    gvis="${GROUP_VIS[$i]}"; grend="${GROUP_REND[$i]}"
+    if [[ -z "$cur" ]]; then
+      cur="$grend"; cur_vis=${#gvis}
+    else
+      newvis=$(( cur_vis + ${#sep} + ${#gvis} ))
+      if (( newvis <= cols )); then
+        cur="${cur}${sep}${grend}"; cur_vis=$newvis
+      else
+        out="${out}${cur}"$'\n'
+        cur="$grend"; cur_vis=${#gvis}
+      fi
+    fi
+  done
+  [[ -n "$cur" ]] && out="${out}${cur}"
+  printf '%s' "$out"
+}
+
+# build_header: width-aware header assembly. Sets globals COLHDR and HEADER.
+# Header is built ONCE at launch, so it reflows on relaunch/refresh (r/s/c/t/p
+# binds), NOT on live terminal resize — acceptable: the complaint is small
+# windows truncating at open, not live reflow. CLAUDE_DASH_COLS is a
+# test/override hook (see --print-header dispatch); real launches fall back
+# to `tput cols` then 80.
+build_header() {
+  cols=${CLAUDE_DASH_COLS:-$(tput cols 2>/dev/null || echo 80)}
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+
+  # Column header padded to the same widths as the display field (see
+  # enumerate). Leading %-4s accounts for the field-13 prefix:
+  # glyph(1)+space(1)+gauge(1)+space(1) — gauge has a separating space before
+  # the CTX% number (reads "▁ 19%" per D-GAUGE), hence 4 not 3 cols. │
+  # separators mirror disp/nzdisp exactly (MODEL|PROJECT, PROJECT|TARGET, TARGET|LAST).
+  # NOT wrapped — it's the data column ruler and stays one line.
+  printf -v COLHDR '%-4s%-4s %-10s │ %-20s │ %-20s │ %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
+
+  # Icon legend groups: status_icon glyphs, each colored with its status hue.
+  GROUP_VIS=(); GROUP_REND=()
+  GROUP_VIS+=("$(status_icon waiting) wait");   GROUP_REND+=("${C_WAIT}$(status_icon waiting)${C_RESET} wait")
+  GROUP_VIS+=("$(status_icon busy) busy");      GROUP_REND+=("${C_BUSY}$(status_icon busy)${C_RESET} busy")
+  GROUP_VIS+=("$(status_icon shell) bg-shell"); GROUP_REND+=("${C_SHELL}$(status_icon shell)${C_RESET} bg-shell")
+  GROUP_VIS+=("$(status_icon idle) idle");      GROUP_REND+=("${C_IDLE}$(status_icon idle)${C_RESET} idle")
+  GROUP_VIS+=("$(status_icon dormant) resume"); GROUP_REND+=("${C_DIM}$(status_icon dormant)${C_RESET} resume")
+  local icon_lines
+  icon_lines=$(pack_groups)
+
+  # Key legend groups — tightened wording (dropped the repeated "sort:"
+  # prefix; terser key=action pairs). This is the authoritative key reference.
+  GROUP_VIS=(); GROUP_REND=()
+  GROUP_VIS+=("s status");      GROUP_REND+=("${C_DIM}s status${C_RESET}")
+  GROUP_VIS+=("c ctx%");        GROUP_REND+=("${C_DIM}c ctx%${C_RESET}")
+  GROUP_VIS+=("t time");        GROUP_REND+=("${C_DIM}t time${C_RESET}")
+  GROUP_VIS+=("p proj");        GROUP_REND+=("${C_DIM}p proj${C_RESET}")
+  GROUP_VIS+=("x sleep");       GROUP_REND+=("${C_DIM}x sleep${C_RESET}")
+  GROUP_VIS+=("r refresh");     GROUP_REND+=("${C_DIM}r refresh${C_RESET}")
+  GROUP_VIS+=("⏎ jump/resume"); GROUP_REND+=("${C_DIM}⏎ jump/resume${C_RESET}")
+  local key_lines
+  key_lines=$(pack_groups)
+
+  HEADER="${icon_lines}"$'\n'"${key_lines}"$'\n'"${C_DIM}${COLHDR}${C_RESET}"
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_file transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session
@@ -624,27 +695,16 @@ if [[ "${1:-}" == "--kill" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "--print-header" ]]; then
+  build_header
+  printf '%s\n' "$HEADER"
+  exit 0
+fi
+
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-# Column header padded to the same widths as the display field (see enumerate).
-# Leading %-4s accounts for the field-13 prefix: glyph(1)+space(1)+gauge(1)+space(1)
-# — the gauge now has a separating space before the CTX% number (reads "▁ 19%"
-# per D-GAUGE), hence 4 not 3 cols.
-# │ separators mirror disp/nzdisp exactly (between MODEL|PROJECT, PROJECT|TARGET, TARGET|LAST).
-printf -v COLHDR '%-4s%-4s %-10s │ %-20s │ %-20s │ %s' '' 'CTX%' 'MODEL' 'PROJECT' 'TARGET' 'LAST'
-# D-CHROME.2 / B (restored key legend): three-line header — icon legend
-# (status_icon glyphs, each colored with its status hue), a NEW key legend
-# line (dim, existing C_DIM palette var — no new colors) naming every
-# s/c/t/p/x/r/Enter action, then the dim COLHDR. --prompt below stays short;
-# the authoritative key reference now lives here.
-printf -v HDR_ICONS '%s%s%s wait   %s%s%s busy   %s%s%s bg-shell   %s%s%s idle   %s%s%s resume' \
-  "$C_WAIT" "$(status_icon waiting)" "$C_RESET" \
-  "$C_BUSY" "$(status_icon busy)" "$C_RESET" \
-  "$C_SHELL" "$(status_icon shell)" "$C_RESET" \
-  "$C_IDLE" "$(status_icon idle)" "$C_RESET" \
-  "$C_DIM" "$(status_icon dormant)" "$C_RESET"
-HDR_KEYS="${C_DIM}s sort:status  c sort:ctx%  t sort:time  p sort:project  x sleep  r refresh  Enter jump/resume${C_RESET}"
-HEADER="${HDR_ICONS}"$'\n'"${HDR_KEYS}"$'\n'"${C_DIM}${COLHDR}${C_RESET}"
+# Width-aware icon/key legend + COLHDR, packed into $HEADER (see build_header).
+build_header
 
 # D-CHROME.1: live (non-dormant) session count for the border label. Sort key
 # (field 6) != 5 means not-dormant. Reload (r/s/c/t/p/x binds) doesn't re-fire
