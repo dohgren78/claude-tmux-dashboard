@@ -19,7 +19,7 @@ Built for running many Claude Code sessions in parallel (one project per tmux se
 ────────────────────────────────────────────────────────────────────────────
 ```
 
-> The status column (`?` `>` `&` `.` `z` above) is shown here as ASCII so it renders anywhere. **In the terminal these are colour-coded [Nerd Font](https://www.nerdfonts.com/) icons** — a spinner for busy, a folder-shell for bg-shell, a dot for idle, and so on — and the CTX% gauge (`▁▃▅▇`) is graded green → amber → red. See [Install](#install) for the font.
+> The status column (`?` `>` `&` `.` `z` above) is shown here as ASCII. **In the terminal these are colour-coded [Nerd Font](https://www.nerdfonts.com/) icons** by default — a spinner for busy, a folder-shell for bg-shell, a dot for idle, and so on — and the CTX% gauge (`▁▃▅▇`) is graded green → amber → red. Without a Nerd Font, set `CLAUDE_DASH_ASCII=1` for exactly the ASCII glyphs above (see [Install](#install)).
 
 Live sessions on top (jump with Enter), parked ones (`z`) below (Enter resumes the exact conversation, `x` sleeps a live one). The status icon, CTX% gauge, and MODEL are colour-coded, and the whole row dims when idle so the active ones stand out.
 
@@ -35,7 +35,7 @@ cd claude-tmux-dashboard
 
 `install.sh` symlinks `claude-dash.sh` into `~/.claude/bin/` and adds a `prefix + Ctrl-j` binding to `~/.tmux.conf` (idempotent — safe to re-run). Then press **`prefix` + `Ctrl-j`** inside any tmux session.
 
-**Nerd Font (recommended):** the status column uses [Nerd Font](https://www.nerdfonts.com/) icons. Set your terminal font to a patched font (e.g. `JetBrainsMono Nerd Font`) for the icons; without one they fall back to plain glyphs. Everything else (the gauge bars, `│` separators, colours) is standard Unicode and works in any font.
+**Nerd Font (for the status icons):** the status column uses [Nerd Font](https://www.nerdfonts.com/) icons. Set your terminal font to a patched font (e.g. `JetBrainsMono Nerd Font`) so they render. If you don't use a Nerd Font, set **`CLAUDE_DASH_ASCII=1`** to get the plain ASCII glyphs (`?` `>` `&` `.` `z`) instead of empty boxes — e.g. change the tmux bind to `... -E "CLAUDE_DASH_ASCII=1 ~/.claude/bin/claude-dash.sh"`, or export it in your shell. Everything else (the gauge bars, `│` separators, colours) is standard Unicode and works in any font.
 
 ## Controls
 
@@ -127,4 +127,4 @@ The dashboard is stateless except for one file: **`~/.claude/.claude-dash-slept`
 
 ## License
 
-Personal tool, no warranty. Use at your own risk.
+[MIT](./LICENSE) — no warranty, use at your own risk.

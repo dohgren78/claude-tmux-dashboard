@@ -62,6 +62,15 @@ ctx_gauge() {
 # their own status color. If any codepoint renders as a box on a given
 # terminal, swap it for a more common v3 glyph per the inline comment.
 status_icon() {
+  # ASCII fallback for terminals without a Nerd Font. Set CLAUDE_DASH_ASCII=1
+  # (env) to get the plain glyphs ? > & . z instead of the icon codepoints.
+  if [ -n "${CLAUDE_DASH_ASCII:-}" ]; then
+    case "$1" in
+      waiting) echo '?' ;; busy) echo '>' ;; shell) echo '&' ;;
+      idle) echo '.' ;; dormant) echo 'z' ;; *) echo '?' ;;
+    esac
+    return
+  fi
   case "$1" in
     waiting) echo '' ;;  # nf-fa-hourglass, was ASCII "?"
     busy)    echo '' ;;  # nf-fa-play, was ASCII ">"
