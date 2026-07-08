@@ -1,6 +1,6 @@
-# claude-dash
+# claude-tmux-dashboard
 
-A read-only [fzf](https://github.com/junegunn/fzf) popup that lists every **live Claude Code session** across all your tmux sessions — so you can tell at a glance *which Claude is waiting on you, what model it's on, and how full its context is* — and jump straight to it.
+A read-only [fzf](https://github.com/junegunn/fzf) popup — the **`claude-dash`** command — that lists every **live Claude Code session** across all your tmux sessions, so you can tell at a glance *which Claude is waiting on you, what model it's on, and how full its context is* — and jump straight to it.
 
 Built for running many Claude Code sessions in parallel (one project per tmux session) where `tmux ls` alone doesn't tell you which one needs attention.
 
