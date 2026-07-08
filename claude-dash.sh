@@ -819,8 +819,19 @@ pack_groups() {
 # test/override hook (see --print-header dispatch); real launches fall back
 # to `tput cols` then 80.
 build_header() {
-  cols=${CLAUDE_DASH_COLS:-$(tput cols 2>/dev/null || echo 80)}
-  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  local raw_cols=${CLAUDE_DASH_COLS:-$(tput cols 2>/dev/null || echo 80)}
+  [[ "$raw_cols" =~ ^[0-9]+$ ]] || raw_cols=80
+
+  # The fzf --header renders ONLY in the left list pane; the preview pane takes
+  # PREVIEW_PCT of the width on the right (see --preview-window=right:45% below),
+  # plus ~4 cols of rounded-border + border-left + gutter. The legend wrap budget
+  # must exclude that — measuring the legend against the full popup width lets it
+  # "fit" the popup yet still get truncated inside the narrower list pane.
+  # CLAUDE_DASH_COLS is the RAW terminal width; the preview factor is applied here.
+  # Keep PREVIEW_PCT in sync with the --preview-window=right:NN% flag below.
+  local PREVIEW_PCT=45
+  cols=$(( raw_cols * (100 - PREVIEW_PCT) / 100 - 4 ))
+  (( cols < 24 )) && cols=24
 
   # Column header padded to the same widths as the display field (see
   # enumerate). Leading %-4s accounts for the field-13 prefix:
