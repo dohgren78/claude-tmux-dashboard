@@ -4,6 +4,8 @@ A read-only [fzf](https://github.com/junegunn/fzf) popup that lists every **live
 
 Built for running many Claude Code sessions in parallel (one project per tmux session) where `tmux ls` alone doesn't tell you which one needs attention.
 
+Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-continuity), which restores those same sessions verbatim after a reboot.
+
 ```text
  claude-dash · 9 sessions
 ────────────────────────────────────────────────────────────────────────────
