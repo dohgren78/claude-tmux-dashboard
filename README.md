@@ -6,6 +6,8 @@ Built for running many Claude Code sessions in parallel (one project per tmux se
 
 Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-continuity), which restores those same sessions verbatim after a reboot.
 
+![claude-dash in action](demo.gif)
+
 ```text
  claude-dash · 9 sessions
 ────────────────────────────────────────────────────────────────────────────
