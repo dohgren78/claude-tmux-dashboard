@@ -129,6 +129,25 @@ The dashboard is stateless except for one file: **`~/.claude/.claude-dash-slept`
   done
   ```
 
+- **After moving/renaming a project directory:** the transcript slug is derived from the launch cwd (`slug = cwd` with `/`→`-`), so relocating a project orphans its transcripts under the *old* slug — dormant `z` rows lose their transcript (they drop off or can't resume) and the `cwd`/model/ctx parsing breaks. A compat **symlink** makes it sharper: a session launched *via* the symlink is filed under the symlink's path-slug while its recorded `cwd` is the realpath, so resuming from the real directory looks in a slug that may not exist. Recover by realigning all three (transcript dir, slept `cwd`, name) to the new path:
+
+  ```sh
+  OLD=/old/abs/path; NEW=/new/abs/path
+  os=${OLD//\//-}; ns=${NEW//\//-}
+  # 1. move (merge) the transcript dir into the new slug — non-destructive
+  mkdir -p ~/.claude/projects/"$ns"
+  mv -n ~/.claude/projects/"$os"/*.jsonl ~/.claude/projects/"$ns"/ 2>/dev/null
+  # 2. repoint cwd + relabel a default name (== old basename) in the slept file, drop dupes
+  ob=${OLD##*/}; nb=${NEW##*/}
+  awk -F'\t' -v O="$OLD" -v N="$NEW" -v ob="$ob" -v nb="$nb" 'BEGIN{OFS=FS}
+    {if($3==O)$3=N; if($2==ob)$2=nb} !seen[$0]++' ~/.claude/.claude-dash-slept > /tmp/s \
+    && mv /tmp/s ~/.claude/.claude-dash-slept
+  # 3. drop any compat symlink so new sessions stop landing under the old slug
+  [ -L "$OLD" ] && rm "$OLD"
+  ```
+
+  Custom names that differ from the directory basename (step 2 only renames a name that equals the *old* basename) are left alone. If your shell aliases `rm`/`mv` to `-i`, note they can silently no-op under a non-tty — use `/bin/rm`/`/bin/mv` in scripts.
+
 ## License
 
 [MIT](./LICENSE) — no warranty, use at your own risk.
