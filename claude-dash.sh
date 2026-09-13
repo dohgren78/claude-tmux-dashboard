@@ -137,24 +137,23 @@ transcript_file() {
 # Usage: context_pct <cwd> <sessionId>
 context_pct() {
   local cwd="$1" sid="$2"
-  local tf usage_line model total window pct
+  local tf model total window pct
   tf=$(transcript_file "$cwd" "$sid")
   if [[ -z "$tf" || ! -f "$tf" ]]; then
     printf '%s\t%s\n' "-" ""
     return 0
   fi
-  # Main-chain-only (skips isSidechain subagent lines) — see mainchain_usage_line.
-  usage_line=$(mainchain_usage_line "$tf")
-  if [[ -z "$usage_line" ]]; then
-    printf '%s\t%s\n' "-" ""
-    return 0
-  fi
+  # Main-chain-only (skips isSidechain subagent lines; same filter as
+  # mainchain_usage_line, which stays exported for the preview). Selection and
+  # field extraction are one jq instead of two — this runs per row on every open.
   # Context occupancy = prompt tokens (input + cache read + cache creation).
   # output_tokens is the generated reply, not window occupancy at request time.
-  IFS=$'\t' read -r model total < <(printf '%s\n' "$usage_line" | jq -r '
-    [ (.message.model // "unknown"),
-      (.message.usage | ((.input_tokens//0)+(.cache_read_input_tokens//0)+(.cache_creation_input_tokens//0))) ]
-    | @tsv' 2>/dev/null)
+  # No usage line -> model/total empty -> the guard below prints "-", same as before.
+  IFS=$'\t' read -r model total < <(tail -r "$tf" 2>/dev/null | jq -Rr '
+    fromjson? | select((.message.usage != null) and (.isSidechain != true))
+    | [ (.message.model // "unknown"),
+        (.message.usage | ((.input_tokens//0)+(.cache_read_input_tokens//0)+(.cache_creation_input_tokens//0))) ]
+    | @tsv' 2>/dev/null | head -1)
   if [[ -z "$total" || ! "$total" =~ ^[0-9]+$ ]]; then
     printf '%s\t%s\n' "-" "$model"
     return 0
@@ -321,21 +320,48 @@ enumerate_sessions() {
   # emitted here — DAEMON-MERGE (below) decides how records become rows.
   local -a records=()
 
+  # PASS 0: read each session json once (one jq per file, so a malformed file
+  # only drops itself), then resolve every pid with ONE ps call. This used to be
+  # three ps spawns per session (liveness, cmdline, tty) plus an awk for the pane
+  # lookup; after the macOS 27 upgrade a spawn cost ~20ms under background load
+  # and this loop dominated the popup's open time. Lookups scan small indexed
+  # arrays (bash 3.2: no declare -A) — never ${blob#*key}, which backtracks
+  # pathologically on a large string.
+  local -a S_FIELDS=() P_PID=() P_TTY=() P_CMD=() M_KEY=() M_VAL=()
+  local pidlist="" fields fpid pp pt pc mk ms mw mp _rest _k si pi
   for f in "$SESSIONS_DIR"/*.json; do
     [[ -f "$f" ]] || continue
-
     # Parse all fields in one jq call, including daemon `kind` (defaults to
     # "interactive" for pre-daemon session json that predates this field).
-    local fields
     fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0), (.kind // "interactive"), (.jobId // "")] | @tsv' "$f" 2>/dev/null) || continue
+    fpid="${fields%%$'\t'*}"
+    [[ -z "$fpid" ]] && continue
+    S_FIELDS+=("$fields")
+    pidlist="${pidlist:+$pidlist,}$fpid"
+  done
+  if [[ -n "$pidlist" ]]; then
+    # Dead pids are simply absent from the output (ps exits non-zero for them).
+    while read -r pp pt pc; do
+      [[ -n "$pp" ]] || continue
+      P_PID+=("$pp"); P_TTY+=("$pt"); P_CMD+=("$pc")
+    done < <(ps -o pid=,tty=,command= -p "$pidlist" 2>/dev/null || true)
+  fi
+  if [[ -s "$TTY_MAP_FILE" ]]; then
+    while IFS='|' read -r mk ms mw mp _rest; do
+      M_KEY+=("$mk"); M_VAL+=("$ms|$mw|$mp")
+    done < "$TTY_MAP_FILE"
+  fi
 
+  for (( si=0; si<${#S_FIELDS[@]}; si++ )); do
     local pid sess_status waiting_for cwd sid updated_at kind jobid
-    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind jobid <<< "$fields"
-
-    [[ -z "$pid" ]] && continue
+    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind jobid <<< "${S_FIELDS[$si]}"
 
     # Dead-pid filter — stale files persist after pid dies
-    ps -p "$pid" -o pid= >/dev/null 2>&1 || continue
+    pi=-1
+    for (( _k=0; _k<${#P_PID[@]}; _k++ )); do
+      [[ "${P_PID[$_k]}" == "$pid" ]] && { pi=$_k; break; }
+    done
+    (( pi < 0 )) && continue
     live_sids="${live_sids}${sid}"$'\n'
 
     # SPARE-FILTER: primary signal is `--bg-spare` on the process cmdline.
@@ -343,15 +369,18 @@ enumerate_sessions() {
     # under the daemon instance dir are corroborating signals only — the
     # cmdline check is authoritative and runs first, before any kind-based
     # grouping, since a spare proc's session json can carry kind=bg too.
-    local cmdline
-    cmdline=$(ps -o command= -p "$pid" 2>/dev/null || true)
+    local cmdline="${P_CMD[$pi]}"
     [[ "$cmdline" == *--bg-spare* ]] && continue
 
-    # Resolve tty → pane via temp mapfile
+    # Resolve tty → pane via the map loaded above (same first-match semantics
+    # as pane_lookup, which stays exported for the preview subprocess)
     local raw_tty tty pane_info jump_target tmux_target
-    raw_tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ') || raw_tty=""
+    raw_tty="${P_TTY[$pi]}"
     tty="${raw_tty##*/}"
-    pane_info=$(pane_lookup "$tty" "$TTY_MAP_FILE")
+    pane_info=""
+    for (( _k=0; _k<${#M_KEY[@]}; _k++ )); do
+      [[ "${M_KEY[$_k]}" == "$tty" ]] && { pane_info="${M_VAL[$_k]}"; break; }
+    done
 
     if [[ -n "$pane_info" ]]; then
       local p_sess p_win p_pane
@@ -497,7 +526,7 @@ enumerate_sessions() {
       [[ -n "$nsid" && -n "$ncwd" ]] || continue
       case "$seen" in *"|${nsid}|"*) continue ;; esac   # newest entry per sid wins
       seen="${seen}|${nsid}|"
-      printf '%s' "$live_sids" | grep -qxF "$nsid" && continue   # resumed/live now → skip
+      [[ $'\n'"$live_sids" == *$'\n'"$nsid"$'\n'* ]] && continue   # resumed/live now → skip (builtin; was a grep spawn per slept session)
       nslug="${ncwd//\//-}"
       ntf="$PROJECTS_DIR/$nslug/$nsid.jsonl"
       [[ -f "$ntf" ]] || continue                        # transcript gone → can't resume
@@ -922,12 +951,15 @@ build_header
 # D-CHROME.1: live (non-dormant) session count for the border label. Sort key
 # (field 6) != 5 means not-dormant. Reload (r/s/c/t/p/x binds) doesn't re-fire
 # the label — it stays at this initial count, matching fzf's reload semantics.
-live_count=$(enumerate_sessions status | awk -F'\t' '$6!=5' | wc -l | tr -d ' ')
+# Enumerate ONCE and reuse for both the count and fzf's initial list — this used
+# to run the whole enumeration twice per open. Reload binds re-enumerate via --list.
+rows_initial=$(enumerate_sessions status)
+live_count=$(printf '%s\n' "$rows_initial" | awk -F'\t' 'NF && $6!=5' | wc -l | tr -d ' ')
 
 # fzf pipeline — Enter accepts and returns the selected line; jump happens
 # AFTER fzf exits / the popup closes (switch-client inside an open popup is flaky).
 sel=$(
-  enumerate_sessions \
+  { [[ -n "$rows_initial" ]] && printf '%s\n' "$rows_initial"; } \
     | fzf \
         --ansi \
         --layout=reverse \
