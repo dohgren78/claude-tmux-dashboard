@@ -12,7 +12,7 @@ Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-c
  claude-dash · 9 sessions
 ────────────────────────────────────────────────────────────────────────────
  ? wait   > busy   & bg-shell   . idle   z resume
- s status   c ctx%   t time   p proj   x sleep   r refresh   ↵ jump/resume
+ s status   c ctx%   t time   p proj   n new   x sleep   X forget   r refresh   ↵ jump/resume
 
      CTX% MODEL    │ PROJECT              │ TARGET             │ LAST
  > ▁ 14%  Opus 4.8 │ GrapplingTracks      │ daily-porrada:1.1  │ 44s
@@ -51,9 +51,11 @@ cd claude-tmux-dashboard
 | `t` | Sort by last activity (most recent first) |
 | `p` | Sort by project name (A–Z) |
 | `x` | Sleep the selected live session — kills its tmux session to free RAM; the conversation persists and reappears as a dormant `z` row, resumable. The border label confirms the result instantly (`slept: …`). No-op (with an explanatory label) on dormant rows, unmapped rows, and the dashboard's own session. |
+| `n` | List projects from a registry file that have no live or dormant row (a session in a subdirectory counts as open). The registry defaults to `~/.config/claude-project/projects.tsv`, override with `CLAUDE_DASH_REGISTRY`; format is one `name<TAB>absolute-path` per line. `Enter` on a `+` row opens the project after the popup closes: via a `cproj` helper if one is on `PATH` (it applies its own `claude` flags), else a plain `tmux new-session` running `claude`. Rows with an unsafe name or path (`|`, tab, leading `-`, relative, or not a directory) are skipped. The border label shows the count or why the list is empty; `r`/`s` return to the session list. |
+| `X` | Forget the selected dormant row for good: removes every line for that session from the slept list. The transcript stays, so `claude --resume <id>` still works. No-op (with a label) on live and new rows. |
 | `r` | Refresh |
 
-Because `s`/`c`/`t`/`p`/`x` are action keys they don't type-to-filter the fzf query — fine for a short list. The key legend at the top **wraps onto extra rows on narrow terminals** instead of truncating.
+Because `s`/`c`/`t`/`p`/`n`/`x`/`X` are action keys they don't type-to-filter the fzf query — fine for a short list. The key legend at the top **wraps onto extra rows on narrow terminals** instead of truncating.
 
 ## Columns
 
@@ -100,7 +102,7 @@ It reports the detected Claude Code version (and the version the assumptions wer
 
 ## Read-only
 
-The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit `Enter` actions — **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** for a dormant row — and `x`, which sleeps a live session by killing its tmux session (the conversation persists). `--doctor`, `--list`, and `--preview` are pure reads.
+The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit `Enter` actions — **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** for a dormant row — `n` (opens a registry project after `Enter`, same spawn path as resume), `x`, which sleeps a live session by killing its tmux session (the conversation persists), and `X`, which rewrites only the dashboard's own slept list and never touches transcripts. `--doctor`, `--list`, and `--preview` are pure reads.
 
 ## Compatibility & assumptions
 
@@ -112,6 +114,7 @@ The script never writes Claude session state and never touches tmux session-pers
 
 The dashboard is stateless except for one file: **`~/.claude/.claude-dash-slept`** — appended each time you sleep a session with `x`, one line per sleep (`<sessionId>\t<tmux-name>\t<cwd>`). The dormant `z` list is built entirely from it (entries that aren't currently live and still have a transcript; newest name per `sessionId` wins).
 
+- **Forget one row:** press `X` on a dormant row. It rewrites the slept list without that session (temp file + rename, serialised against `x` by a `.claude-dash-slept.lock` directory); `X` is the per-row alternative to `rm`.
 - **Clear the slept list:** `rm ~/.claude/.claude-dash-slept`. (Conversations are untouched — this tool never deletes transcripts.)
 - **Rebuild it after data loss:** the conversations live on as transcripts, so you can reconstruct one resumable entry per project (most-recent non-live transcript):
 

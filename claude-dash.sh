@@ -8,6 +8,10 @@ set -euo pipefail
 SESSIONS_DIR="$HOME/.claude/sessions"
 PROJECTS_DIR="$HOME/.claude/projects"
 NAMES_FILE="$HOME/.claude/.claude-dash-slept"   # sessionId<TAB>tmux-name<TAB>cwd, written on sleep
+NAMES_LOCK="${NAMES_FILE}.lock"                 # mkdir lock serialising x (append) and X (rewrite)
+# Project registry for the n bind: name<TAB>absolute-path per line, such as the
+# one a `cproj` helper keeps. Override with CLAUDE_DASH_REGISTRY.
+REGISTRY_FILE="${CLAUDE_DASH_REGISTRY:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-project/projects.tsv}"
 
 # ── palette (hoisted for future theming; blue/amber family, NOT a re-theme) ──
 
@@ -67,7 +71,7 @@ status_icon() {
   if [ -n "${CLAUDE_DASH_ASCII:-}" ]; then
     case "$1" in
       waiting) echo '?' ;; busy) echo '>' ;; shell) echo '&' ;;
-      idle) echo '.' ;; dormant) echo 'z' ;; *) echo '?' ;;
+      idle) echo '.' ;; dormant) echo 'z' ;; new) echo '+' ;; *) echo '?' ;;
     esac
     return
   fi
@@ -77,6 +81,7 @@ status_icon() {
     shell)   echo '' ;;  # nf-fa-terminal, was ASCII "&"
     idle)    echo '' ;;  # nf-fa-circle, was ASCII "."
     dormant) echo '' ;;  # nf-fa-history, was ASCII "z"
+    new)     echo '' ;;  # nf-fa-plus, was ASCII "+"
     *)       echo '' ;;  # nf-fa-question, fallback
   esac
 }
@@ -425,7 +430,7 @@ enumerate_sessions() {
   # cheap and keeps this bash-3.2-safe without reaching for `declare -A`.
   local -a R_KIND=() R_SID=() R_PID=() R_CWD=() R_INSTANCE=() R_STATUS=() R_WAITING=() R_UPDATED=() R_TMUX=() R_JUMP=() R_JOBID=()
   local rec rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump rjobid
-  for rec in "${records[@]}"; do
+  for rec in ${records[@]+"${records[@]}"}; do
     IFS=$'\t' read -r rk rsid rpid rcwd rinstance rstatus rwaiting rupdated rtmux rjump rjobid <<< "$rec"
     R_KIND+=("$rk"); R_SID+=("$rsid"); R_PID+=("$rpid"); R_CWD+=("$rcwd")
     R_INSTANCE+=("$rinstance"); R_STATUS+=("$rstatus"); R_WAITING+=("$rwaiting")
@@ -561,6 +566,96 @@ enumerate_sessions() {
   printf '%s' "$rows" | grep -v '^$' | sort -t$'\t' $sortargs
 }
 
+# ── slept-list lock ──────────────────────────────────────────────────────────
+# mkdir is atomic, so NAMES_LOCK serialises the x append and the X rewrite.
+# names_lock [attempts=20]: ~0.1 s per attempt; a lock dir older than 10 s is
+# treated as stale (crashed holder) and broken. Returns 1 when out of attempts.
+names_lock() {
+  local tries="${1:-20}" i mt now
+  for (( i=0; i<tries; i++ )); do
+    mkdir "$NAMES_LOCK" 2>/dev/null && return 0
+    mt=$(stat -f %m "$NAMES_LOCK" 2>/dev/null || stat -c %Y "$NAMES_LOCK" 2>/dev/null || echo "")
+    now=$(date +%s)
+    if [[ "$mt" =~ ^[0-9]+$ ]] && (( now - mt > 10 )); then
+      rmdir "$NAMES_LOCK" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+names_unlock() { rmdir "$NAMES_LOCK" 2>/dev/null || true; }
+
+# list_new_projects: registry projects with no live or dormant row. A project
+# counts as open when a row cwd equals its path or lies under it (path + "/").
+# Emits the same 13-field rows as enumerate_sessions, sortkey 6, jump NEW|name|path.
+list_new_projects() {
+  [[ -f "$REGISTRY_FILE" ]] || return 0
+  local existing cwds="" c name path glyph gauge disp disp_colored out=""
+  existing=$(enumerate_sessions status)
+  while IFS=$'\t' read -r _ _ _ _ _ _ _ _ _ c _; do
+    [[ -n "$c" ]] || continue
+    while [[ "$c" == */ && "$c" != "/" ]]; do c="${c%/}"; done
+    cwds="${cwds}${c}"$'\n'
+  done <<< "$existing"
+  cwds=$'\n'"$cwds"
+  glyph="${C_DIM}$(status_icon new)${C_RESET}"
+  gauge=$(ctx_gauge "-")
+  while IFS=$'\t' read -r name path || [[ -n "$name" ]]; do
+    [[ -n "$name" && -n "$path" ]] || continue
+    case "$name$path" in *"|"*|*$'\r'*) continue ;; esac
+    [[ "$name" == -* ]] && continue
+    [[ "$path" == /* ]] || continue
+    while [[ "$path" == */ && "$path" != "/" ]]; do path="${path%/}"; done
+    [[ -d "$path" ]] || continue
+    [[ "$cwds" == *$'\n'"$path"$'\n'* ]] && continue
+    [[ "$cwds" == *$'\n'"$path"/* ]] && continue
+    printf -v disp '%-4s %-10.10s │ %-20.20s │ %-20.20s │ %-4s' "-" "-" "$name" "(new)" "-"
+    disp_colored="${C_DIM}${disp}${C_RESET}"
+    out="${out}${glyph}	-	${name}	(new)	-	6	NEW|${name}|${path}	-	-	${path}	-	0	${glyph} ${gauge} ${disp_colored}
+"
+  done < "$REGISTRY_FILE"
+  printf '%s' "$out" | grep -v '^$' | sort -t$'\t' -k3,3 || true
+}
+
+new_label() {
+  local n
+  if [[ ! -f "$REGISTRY_FILE" ]]; then
+    printf ' no registry at %s (set CLAUDE_DASH_REGISTRY) ' "$REGISTRY_FILE"
+    return 0
+  fi
+  n=$(list_new_projects | grep -c . || true)
+  if [[ "${n:-0}" -eq 0 ]]; then printf ' all registry projects are open '
+  else printf ' new: %s projects not running ' "$n"; fi
+  command -v cproj >/dev/null 2>&1 || printf -- '- no cproj on PATH, opening with plain tmux '
+}
+
+# forget_session: X on a dormant row removes every slept-list line for its
+# sessionId (temp file + mv under the lock). Transcripts are never touched.
+forget_session() {
+  local line="$1" jump sid tmp mode
+  jump=$(printf '%s' "$line" | cut -f7)
+  if [[ "$jump" != RESUME\|* ]]; then printf ' X forgets dormant rows only '; return 0; fi
+  sid=$(printf '%s' "$line" | cut -f11)
+  if [[ -z "$sid" || "$sid" == "-" || ! "$sid" =~ ^[A-Za-z0-9-]+$ || ! -f "$NAMES_FILE" ]]; then
+    printf ' nothing to forget '; return 0
+  fi
+  if ! names_lock; then printf ' slept list busy, try again '; return 0; fi
+  if ! awk -F'\t' -v s="$sid" '$1==s{f=1} END{exit f?0:1}' "$NAMES_FILE"; then
+    names_unlock; printf ' nothing to forget '; return 0
+  fi
+  tmp=$(mktemp "${NAMES_FILE}.XXXXXX") || { names_unlock; printf ' could not forget '; return 0; }
+  mode=$(stat -f '%Lp' "$NAMES_FILE" 2>/dev/null || stat -c '%a' "$NAMES_FILE" 2>/dev/null || true)
+  [[ -n "$mode" ]] && { chmod "$mode" "$tmp" 2>/dev/null || true; }
+  if awk -F'\t' -v s="$sid" '$1 != s' "$NAMES_FILE" > "$tmp" && mv -f "$tmp" "$NAMES_FILE"; then
+    names_unlock
+    printf ' forgot: %s (transcript untouched) ' "${sid:0:8}"
+  else
+    rm -f "$tmp"; names_unlock
+    printf ' could not forget '
+  fi
+}
+
 # ── preview helper ────────────────────────────────────────────────────────────
 
 preview_session() {
@@ -577,13 +672,15 @@ preview_session() {
     1) status_word="busy"    ; glyph_plain=$(status_icon busy)    ; status_color="$C_BUSY"  ;;
     2) status_word="bg-shell (live, has a background shell)" ; glyph_plain=$(status_icon shell) ; status_color="$C_SHELL" ;;
     3) status_word="idle"    ; glyph_plain=$(status_icon idle)    ; status_color="$C_IDLE"  ;;
+    6) status_word="not started - Enter opens it (cproj if on PATH)" ; glyph_plain=$(status_icon new) ; status_color="$C_DIM" ;;
     5) status_word="dormant — press Enter to resume (claude --resume)" ; glyph_plain=$(status_icon dormant) ; status_color="$C_DIM"  ;;
     *) status_word="unknown" ; glyph_plain=$(status_icon)         ; status_color="$C_RESET" ;;
   esac
 
   local slug tf model_id preview_usage_line
   slug="${cwd//\//-}"
-  tf=$(transcript_file "$cwd" "$sid")
+  tf=""
+  [[ "$sid" == "-" ]] || tf=$(transcript_file "$cwd" "$sid")
 
   # DAEMON-MERGE enrichment: field 11 (sid) / field 9 (pid) on a merged row
   # are the BG job's own — surface its daemon job name (session json is keyed
@@ -655,8 +752,9 @@ preview_session() {
 # No-op (with an explanatory label) on dormant rows, unmapped rows, and on the
 # session the dashboard itself is attached to.
 kill_session() {
-  local line="$1" jump sess cur sid cwd
+  local line="$1" jump sess cur sid cwd lockmsg=""
   jump=$(printf '%s' "$line" | cut -f7)
+  if [[ "$jump" == NEW\|* ]]; then printf ' new row: press Enter to open '; return 0; fi
   if [[ "$jump" == RESUME\|* ]]; then printf ' z row — press Enter to resume (x only sleeps live) '; return 0; fi
   if [[ "$jump" == "-" || -z "$jump" ]]; then printf ' no tmux pane — nothing to sleep '; return 0; fi
   IFS='|' read -r sess _ _ <<< "$jump"
@@ -667,8 +765,16 @@ kill_session() {
     # Record sessionId -> tmux name -> cwd: the dormant 'z' list is built from this.
     sid=$(printf '%s' "$line" | cut -f11)
     cwd=$(printf '%s' "$line" | cut -f10)
-    [[ -n "$sid" ]] && printf '%s\t%s\t%s\n' "$sid" "$sess" "$cwd" >> "$NAMES_FILE" 2>/dev/null
-    printf ' slept: %s (now a z row) ' "$sess"
+    if [[ -n "$sid" ]]; then
+      if names_lock 130; then
+        printf '%s\t%s\t%s\n' "$sid" "$sess" "$cwd" >> "$NAMES_FILE" 2>/dev/null || true
+        names_unlock
+      else
+        printf '%s\t%s\t%s\n' "$sid" "$sess" "$cwd" >> "$NAMES_FILE" 2>/dev/null || true
+        lockmsg=" (slept-list lock busy)"
+      fi
+    fi
+    printf ' slept: %s (now a z row)%s ' "$sess" "$lockmsg"
   else printf ' could not sleep %s ' "$sess"; fi
 }
 
@@ -903,7 +1009,9 @@ build_header() {
   GROUP_VIS+=("c ctx%");        GROUP_REND+=("${C_DIM}c ctx%${C_RESET}")
   GROUP_VIS+=("t time");        GROUP_REND+=("${C_DIM}t time${C_RESET}")
   GROUP_VIS+=("p proj");        GROUP_REND+=("${C_DIM}p proj${C_RESET}")
+  GROUP_VIS+=("n new");         GROUP_REND+=("${C_DIM}n new${C_RESET}")
   GROUP_VIS+=("x sleep");       GROUP_REND+=("${C_DIM}x sleep${C_RESET}")
+  GROUP_VIS+=("X forget");      GROUP_REND+=("${C_DIM}X forget${C_RESET}")
   GROUP_VIS+=("r refresh");     GROUP_REND+=("${C_DIM}r refresh${C_RESET}")
   GROUP_VIS+=("⏎ jump/resume"); GROUP_REND+=("${C_DIM}⏎ jump/resume${C_RESET}")
   local key_lines
@@ -914,11 +1022,21 @@ build_header() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_file transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session doctor_check build_header pack_groups
-export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE
+export -f elapsed_human ctx_gauge context_pct model_label mainchain_usage_line transcript_file transcript_mtime pane_lookup bg_instance build_row preview_session enumerate_sessions kill_session list_new_projects new_label names_lock names_unlock forget_session doctor_check build_header pack_groups
+export SESSIONS_DIR PROJECTS_DIR TTY_MAP_FILE NAMES_FILE NAMES_LOCK REGISTRY_FILE
 
 if [[ "${1:-}" == "--list" ]]; then
-  enumerate_sessions "${2:-status}"
+  if [[ "${2:-}" == "new" ]]; then list_new_projects; else enumerate_sessions "${2:-status}"; fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "--newlabel" ]]; then
+  new_label
+  exit 0
+fi
+
+if [[ "${1:-}" == "--forget" ]]; then
+  forget_session "${2:-}"
   exit 0
 fi
 
@@ -982,12 +1100,31 @@ sel=$(
         --bind "c:reload(\"$SCRIPT_PATH\" --list ctx)" \
         --bind "t:reload(\"$SCRIPT_PATH\" --list activity)" \
         --bind "p:reload(\"$SCRIPT_PATH\" --list project)" \
-        --bind "x:transform-border-label(\"$SCRIPT_PATH\" --kill {})+reload(\"$SCRIPT_PATH\" --list status)"
+        --bind "n:transform-border-label(\"$SCRIPT_PATH\" --newlabel)+reload(\"$SCRIPT_PATH\" --list new)" \
+        --bind "x:transform-border-label(\"$SCRIPT_PATH\" --kill {})+reload(\"$SCRIPT_PATH\" --list status)" \
+        --bind "X:transform-border-label(\"$SCRIPT_PATH\" --forget {})+reload(\"$SCRIPT_PATH\" --list status)"
 ) || exit 0
 
 [[ -z "$sel" ]] && exit 0
 
 jump=$(printf '%s' "$sel" | cut -f7)
+
+# NEW row (n bind) → open the registry project now that fzf has exited. cproj
+# (when on PATH) applies its own claude flags; otherwise plain tmux. Name and
+# path are only ever passed as quoted argv; send-keys sends the literal "claude".
+if [[ "$jump" == NEW\|* ]]; then
+  IFS='|' read -r _ n_name n_path <<< "$jump"
+  case "$n_name" in ls|kill|resume|cont|killall) echo "reserved project name: $n_name" >&2; exit 0 ;; esac
+  if command -v cproj >/dev/null 2>&1; then
+    exec cproj "$n_name" "$n_path"
+  fi
+  if tmux has-session -t "=$n_name" 2>/dev/null; then
+    exec tmux switch-client -t "=$n_name"
+  fi
+  tmux new-session -d -s "$n_name" -c "$n_path" -n claude
+  tmux send-keys -t "$n_name:claude" "claude" C-m
+  exec tmux switch-client -t "$n_name"
+fi
 
 # Dormant row → resume THIS exact conversation (claude --resume <sessionId>) in a
 # fresh tmux session at its cwd. Never --continue (which grabs the cwd's most-recent).
