@@ -592,7 +592,7 @@ names_unlock() { rmdir "$NAMES_LOCK" 2>/dev/null || true; }
 list_new_projects() {
   [[ -f "$REGISTRY_FILE" ]] || return 0
   local existing cwds="" c name path glyph gauge disp disp_colored out=""
-  existing=$(enumerate_sessions status)
+  existing=$(enumerate_sessions status) || true   # no live/dormant sessions must not abort under set -e
   while IFS=$'\t' read -r _ _ _ _ _ _ _ _ _ c _; do
     [[ -n "$c" ]] || continue
     while [[ "$c" == */ && "$c" != "/" ]]; do c="${c%/}"; done
@@ -604,6 +604,7 @@ list_new_projects() {
   while IFS=$'\t' read -r name path || [[ -n "$name" ]]; do
     [[ -n "$name" && -n "$path" ]] || continue
     case "$name$path" in *"|"*|*$'\r'*) continue ;; esac
+    case "$name" in *.*|*:*) continue ;; esac   # tmux parses . and : in targets, even with =
     [[ "$name" == -* ]] && continue
     [[ "$path" == /* ]] || continue
     while [[ "$path" == */ && "$path" != "/" ]]; do path="${path%/}"; done
@@ -765,6 +766,11 @@ kill_session() {
     # Record sessionId -> tmux name -> cwd: the dormant 'z' list is built from this.
     sid=$(printf '%s' "$line" | cut -f11)
     cwd=$(printf '%s' "$line" | cut -f10)
+    # claude writes the transcript on the first message; a session that never
+    # had one has nothing to resume, so it gets no dormant row.
+    if [[ -n "$sid" && ! -f "$PROJECTS_DIR/${cwd//\//-}/$sid.jsonl" ]]; then
+      printf ' closed: %s (no conversation yet, reopen with n) ' "$sess"; return 0
+    fi
     if [[ -n "$sid" ]]; then
       if names_lock 130; then
         printf '%s\t%s\t%s\n' "$sid" "$sess" "$cwd" >> "$NAMES_FILE" 2>/dev/null || true
