@@ -11,7 +11,7 @@ Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-c
 ```text
  claude-dash · 9 sessions
 ────────────────────────────────────────────────────────────────────────────
- ? wait   > busy   & bg-shell   . idle   z resume
+ ? wait   > busy   & bg-shell   . idle   z resume   (app) Claude Desktop app
  s status   c ctx%   t time   p proj   n new   x sleep   X forget   r refresh   ↵ jump/resume
 
      CTX% MODEL    │ PROJECT              │ TARGET             │ LAST
@@ -19,6 +19,7 @@ Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-c
  . ▃ 41%  Opus 4.8 │ whispa               │ whispa:1.1         │ 2m
  > ▇ 88%  Sonnet 5 │ homelab-fixes        │ homelab-omada:1.1  │ 5s
  . ▁ 6%   Haiku    │ dev-env-optimization │ dev-env-fixes:1.1  │ 1h
+ . ▁ 16%  Opus 4.8 │ GrapplingTrack (app) │ Claude Desktop     │ 22h
  z   -    -        │ media-creation       │ (resume)           │ 1d
 ────────────────────────────────────────────────────────────────────────────
 ```
@@ -67,8 +68,8 @@ Because `s`/`c`/`t`/`p`/`n`/`x`/`X` are action keys they don't type-to-filter th
   - `z` **dormant** — a session you slept with `x`. Listed below the live ones; **Enter resumes that exact conversation** (`claude --resume <sessionId>`).
 - **CTX%** — context-window fill as a colour-graded gauge bar (`▁▃▅▇`, green → amber → red) plus the number. Window-aware (÷200k, or ÷1M for 1M-window models), capped at 99%. Read from the transcript's last **main-chain** token-usage record (sub-agent usage lines are skipped so a spawned Haiku/other-model agent can't mislabel the session).
 - **MODEL** — the active model (e.g. `Opus 4.8`, `Sonnet 5`, `Haiku`, `Fable 5`), derived from the session's transcript.
-- **PROJECT** — the project (cwd basename).
-- **TARGET** — the tmux `session:window.pane` to jump to. May instead show a diagnostic marker (see [Daemon-aware merge](#daemon-aware-merge)): `detached`, `unlinked?`, or `ambiguous?`.
+- **PROJECT** — the project (cwd basename). Sessions running in the **Claude Desktop app** (not in tmux) get an `(app)` tag, so they don't look like a duplicate of a tmux session in the same folder. The name is cut to 14 characters to keep the tag visible.
+- **TARGET** — the tmux `session:window.pane` to jump to, or `Claude Desktop` for an app session (no pane to jump to; switch to the Claude app instead). May instead show a diagnostic marker (see [Daemon-aware merge](#daemon-aware-merge)): `detached`, `unlinked?`, or `ambiguous?`.
 - **LAST** — time since last activity.
 
 ## Daemon-aware merge

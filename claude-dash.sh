@@ -265,13 +265,22 @@ build_row() {
   local proj="${cwd:-unknown}"
   proj="${proj##*/}"
 
+  # Claude Desktop app session (no tmux pane): tag it so it doesn't read as a
+  # duplicate of a tmux row in the same project. Display only; field 3 stays raw
+  # for sorting. Name is cut to 14 so the tag survives the 20-col truncation.
+  local proj_disp="$proj" target_disp="$tmux_target"
+  if [[ "${app_pids:-}" == *"|${pid}|"* ]]; then
+    proj_disp="${proj:0:14} (app)"
+    target_disp="Claude Desktop"
+  fi
+
   # Padded display column (field 13). NO ANSI inside disp itself — ANSI
   # corrupts %-Ns width math. Dim │ separators between MODEL|PROJECT,
   # PROJECT|TARGET, TARGET|LAST are plain chars (1 col each, printf-safe).
   # ANSI (gauge + row color) is composed OUTSIDE disp, same pattern as glyph.
   local disp
   printf -v disp '%-4s %-10.10s │ %-20.20s │ %-20.20s │ %-4s' \
-    "$ctx_pct" "$model_lbl" "$proj" "$tmux_target" "$act_str"
+    "$ctx_pct" "$model_lbl" "$proj_disp" "$target_disp" "$act_str"
 
   # CTX gauge token (display-only, field 13; ctx_pct in field 2 stays raw).
   local gauge_tok
@@ -307,7 +316,7 @@ fi
 
 enumerate_sessions() {
   local mode="${1:-status}"
-  local rows="" row live_sids=""
+  local rows="" row live_sids="" app_pids=""
   _NOW=$(date +%s)
   shopt -s nullglob
 
@@ -338,7 +347,7 @@ enumerate_sessions() {
     [[ -f "$f" ]] || continue
     # Parse all fields in one jq call, including daemon `kind` (defaults to
     # "interactive" for pre-daemon session json that predates this field).
-    fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0), (.kind // "interactive"), (.jobId // "")] | @tsv' "$f" 2>/dev/null) || continue
+    fields=$(jq -r '[.pid//"", (.status//"idle"), (.waitingFor//"-"), (.cwd//""), (.sessionId//""), (.updatedAt//0), (.kind // "interactive"), (.entrypoint // "cli"), (.jobId // "")] | @tsv' "$f" 2>/dev/null) || continue
     fpid="${fields%%$'\t'*}"
     [[ -z "$fpid" ]] && continue
     S_FIELDS+=("$fields")
@@ -358,8 +367,8 @@ enumerate_sessions() {
   fi
 
   for (( si=0; si<${#S_FIELDS[@]}; si++ )); do
-    local pid sess_status waiting_for cwd sid updated_at kind jobid
-    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind jobid <<< "${S_FIELDS[$si]}"
+    local pid sess_status waiting_for cwd sid updated_at kind entrypoint jobid
+    IFS=$'\t' read -r pid sess_status waiting_for cwd sid updated_at kind entrypoint jobid <<< "${S_FIELDS[$si]}"
 
     # Dead-pid filter — stale files persist after pid dies
     pi=-1
@@ -368,6 +377,8 @@ enumerate_sessions() {
     done
     (( pi < 0 )) && continue
     live_sids="${live_sids}${sid}"$'\n'
+    # Sessions run by the Claude Desktop app get an "(app)" tag in build_row.
+    [[ "$entrypoint" == "claude-desktop" ]] && app_pids="${app_pids}|${pid}|"
 
     # SPARE-FILTER: primary signal is `--bg-spare` on the process cmdline.
     # The ~232B stub session json (no usage lines) and the `rv/<id>.sock`
@@ -874,6 +885,8 @@ doctor_check() {
     pane_info=$(pane_lookup "$tty" "$TTY_MAP_FILE")
     if [[ -n "$pane_info" ]]; then
       _pass "interactive pid ${D_PID[$i]} (tty $tty): pane resolved ($pane_info)"
+    elif [[ "$(jq -r '.entrypoint // ""' "${D_JSON[$i]}" 2>/dev/null)" == "claude-desktop" ]]; then
+      _pass "interactive pid ${D_PID[$i]}: Claude Desktop app session (no tmux pane expected)"
     else
       _fail "interactive pid ${D_PID[$i]} (tty $tty): pane NOT resolved"
     fi
@@ -1005,6 +1018,7 @@ build_header() {
   GROUP_VIS+=("$(status_icon shell) bg-shell"); GROUP_REND+=("${C_SHELL}$(status_icon shell)${C_RESET} bg-shell")
   GROUP_VIS+=("$(status_icon idle) idle");      GROUP_REND+=("${C_IDLE}$(status_icon idle)${C_RESET} idle")
   GROUP_VIS+=("$(status_icon dormant) resume"); GROUP_REND+=("${C_DIM}$(status_icon dormant)${C_RESET} resume")
+  GROUP_VIS+=("(app) Claude Desktop app");      GROUP_REND+=("${C_DIM}(app)${C_RESET} Claude Desktop app")
   local icon_lines
   icon_lines=$(pack_groups)
 
