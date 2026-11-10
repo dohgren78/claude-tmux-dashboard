@@ -8,20 +8,22 @@ Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-c
 
 ![claude-dash in action](demo.gif)
 
+<sub>Recorded against made-up sessions: `vhs demo.tape` runs `demo/run.sh`, which builds a throwaway world under `/tmp/cdash-demo` with its own tmux server.</sub>
+
 ```text
- claude-dash · 9 sessions
+ claude-dash · 5 sessions
 ────────────────────────────────────────────────────────────────────────────
  ? wait   > busy   & bg-shell   . idle   z resume   (app) Claude Desktop app
  s status   c ctx%   t time   p proj   n new   x sleep   X forget
  R past chats   i by id   r refresh   ↵ jump/resume
 
-     CTX% MODEL    │ PROJECT              │ TARGET             │ LAST
- > ▁ 14%  Opus 4.8 │ GrapplingTracks      │ daily-porrada:1.1  │ 44s
- . ▃ 41%  Opus 4.8 │ whispa               │ whispa:1.1         │ 2m
- > ▇ 88%  Sonnet 5 │ homelab-fixes        │ homelab-omada:1.1  │ 5s
- . ▁ 6%   Haiku    │ dev-env-optimization │ dev-env-fixes:1.1  │ 1h
- . ▁ 16%  Opus 4.8 │ GrapplingTrack (app) │ Claude Desktop     │ 22h
- z   -    -        │ media-creation       │ (resume)           │ 1d
+     CTX% MODEL      │ PROJECT              │ TARGET             │ LAST
+ ? ▃ 42%  Opus 5.5   │ api-server           │ api-server:1.1     │ 35s
+ > ▁ 18%  Sonnet 5.5 │ web-app              │ web-app:1.1        │ 4s
+ > ▅ 71%  Opus 5.5   │ ios-client           │ ios-client:1.1     │ 11s
+ & ▃ 33%  Sonnet 5.5 │ data-pipeline        │ data-pipeline:1.1  │ 2m
+ . ▅ 56%  Haiku 4.5  │ infra                │ infra:1.1          │ 1h
+ z   -    -          │ billing              │ (resume)           │ 1d
 ────────────────────────────────────────────────────────────────────────────
 ```
 
@@ -81,7 +83,7 @@ Because `s`/`c`/`t`/`p`/`n`/`x`/`X`/`R`/`i` are action keys they don't type-to-f
   - `.` **idle**
   - `z` **dormant** — a session you slept with `x`. Listed below the live ones; **Enter resumes that exact conversation** (`claude --resume <sessionId>`).
 - **CTX%** — context-window fill as a colour-graded gauge bar (`▁▃▅▇`, green → amber → red) plus the number. Window-aware (÷200k, or ÷1M for 1M-window models), capped at 99%. Read from the transcript's last **main-chain** token-usage record (sub-agent usage lines are skipped so a spawned Haiku/other-model agent can't mislabel the session).
-- **MODEL** — the active model (e.g. `Opus 4.8`, `Sonnet 5`, `Haiku`, `Fable 5`), derived from the session's transcript.
+- **MODEL** — the active model, derived from the session's transcript: `claude-<family>-<major>-<minor>` ids read as `Opus 5.5`, `Sonnet 5.5`, `Haiku 4.5` and so on, so new releases need no code change.
 - **PROJECT** — the project (cwd basename). Sessions running in the **Claude Desktop app** (not in tmux) get an `(app)` tag, so they don't look like a duplicate of a tmux session in the same folder. The name is cut to 14 characters to keep the tag visible.
 - **TARGET** — the tmux `session:window.pane` to jump to, or `Claude Desktop` for an app session (no pane to jump to; switch to the Claude app instead). May instead show a diagnostic marker (see [Daemon-aware merge](#daemon-aware-merge)): `detached`, `unlinked?`, or `ambiguous?`.
 - **LAST** — time since last activity.

@@ -98,23 +98,26 @@ status_icon() {
 # Raw model id → short display label. Pure function, single source of truth
 # for both the list column and the preview "Model:" line.
 model_label() {
-  local id="$1"
-  case "$id" in
-    claude-opus-4-8*)   echo "Opus 4.8" ;;
-    claude-opus-4-7*)   echo "Opus 4.7" ;;
-    claude-opus-4-6*)   echo "Opus 4.6" ;;
-    claude-sonnet-5*)   echo "Sonnet 5" ;;
-    claude-sonnet-4-6*) echo "Sonnet 4.6" ;;
-    claude-haiku*)      echo "Haiku" ;;
-    claude-fable-5*)    echo "Fable 5" ;;
-    ""|unknown|-)       echo "?" ;;
-    *)
-      local rest tok
-      rest="${id#claude-}"
-      tok="${rest%%-*}"
-      echo "${tok:-?}"
-      ;;
-  esac
+  # claude-<family>-<major>[-<minor>][-<date>] -> "Family major.minor", e.g.
+  # claude-opus-5-5 -> "Opus 5.5", claude-haiku-4-5-20251001 -> "Haiku 4.5".
+  local id="$1" rest fam maj min
+  case "$id" in ""|unknown|-) echo "?"; return 0 ;; esac
+  rest="${id#claude-}"
+  fam="${rest%%-*}"; rest="${rest#"$fam"}"; rest="${rest#-}"
+  maj="${rest%%-*}"; rest="${rest#"$maj"}"; rest="${rest#-}"
+  min="${rest%%-*}"
+  # Legacy order claude-<major>-<minor>-<family>-<date> (e.g. claude-3-5-sonnet-*).
+  if [[ "$fam" =~ ^[0-9]+$ && "$maj" =~ ^[0-9]+$ && "$min" =~ ^[a-z]+$ ]]; then
+    local f2="$min"; min="$maj"; maj="$fam"; fam="$f2"
+  elif [[ "$fam" =~ ^[0-9]+$ && "$maj" =~ ^[a-z]+$ ]]; then
+    local f2="$maj"; maj="$fam"; min=""; fam="$f2"
+  fi
+  if [[ ! "$fam" =~ ^[a-z]+$ || ! "$maj" =~ ^[0-9]{1,2}$ ]]; then
+    echo "${fam:-?}"
+    return 0
+  fi
+  [[ "$min" =~ ^[0-9]{1,2}$ ]] && maj="$maj.$min"
+  echo "$(tr '[:lower:]' '[:upper:]' <<< "${fam:0:1}")${fam:1} $maj"
 }
 
 # MAINCHAIN: last main-chain (non-sidechain) usage record from a transcript.
