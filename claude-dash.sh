@@ -12,6 +12,15 @@ NAMES_LOCK="${NAMES_FILE}.lock"                 # mkdir lock serialising x (appe
 # Project registry for the n bind: name<TAB>absolute-path per line, such as the
 # one a `cproj` helper keeps. Override with CLAUDE_DASH_REGISTRY.
 REGISTRY_FILE="${CLAUDE_DASH_REGISTRY:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-project/projects.tsv}"
+# Optional cproj helper. tmux popups run with a bare PATH (no ~/bin), so also
+# look in the usual user bin dirs; CLAUDE_DASH_CPROJ overrides.
+CPROJ="${CLAUDE_DASH_CPROJ:-$(command -v cproj 2>/dev/null || true)}"
+if [[ -z "$CPROJ" ]]; then
+  for _c in "$HOME/bin/cproj" "$HOME/.local/bin/cproj"; do
+    if [[ -x "$_c" ]]; then CPROJ="$_c"; break; fi
+  done
+fi
+UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 # ── palette (hoisted for future theming; blue/amber family, NOT a re-theme) ──
 
@@ -639,7 +648,47 @@ new_label() {
   n=$(list_new_projects | grep -c . || true)
   if [[ "${n:-0}" -eq 0 ]]; then printf ' all registry projects are open '
   else printf ' new: %s projects not running ' "$n"; fi
-  command -v cproj >/dev/null 2>&1 || printf -- '- no cproj on PATH, opening with plain tmux '
+  [[ -n "$CPROJ" ]] || printf -- '- no cproj found, opening with plain tmux '
+}
+
+# id_preview: preview pane of the i screen. Finds the first UUID in the typed or
+# pasted text and describes that conversation: project, last activity, first
+# prompt, and whether it is running right now. Pure read.
+id_preview() {
+  local sid tf cwd first when running=0 f pid
+  sid=$(printf '%s' "$1" | grep -oE "$UUID_RE" | head -1 || true)
+  if [[ -z "$sid" ]]; then
+    printf '%s\n' "${C_DIM}Waiting for a session ID ...${C_RESET}" "" \
+      "${C_DIM}It looks like  be2b0b01-c816-406c-b31e-7a9e224e56c0${C_RESET}" \
+      "${C_DIM}Find it in a resume command, or in Claude via /status.${C_RESET}"
+    return 0
+  fi
+  tf=$(ls "$PROJECTS_DIR"/*/"$sid".jsonl 2>/dev/null | head -1 || true)
+  if [[ -z "$tf" ]]; then
+    printf '%s\n' "${C_WAIT}No conversation with this ID on this machine.${C_RESET}" "" "${C_DIM}$sid${C_RESET}"
+    return 0
+  fi
+  cwd=$(grep -m1 -o '"cwd":"[^"]*"' "$tf" | sed 's/^"cwd":"//; s/"$//' || true)
+  # Last thing asked (Claude records it as a last-prompt line): easier to recognise
+  # than the first message, which is often an injected skill body.
+  first=$(grep '"type":"last-prompt"' "$tf" | tail -1 | jq -r '.lastPrompt // empty' 2>/dev/null \
+          | tr '\n' ' ' | cut -c1-240 || true)
+  when=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$tf")
+  for f in "$SESSIONS_DIR"/*.json; do
+    [[ -e "$f" ]] && grep -q "\"sessionId\":\"$sid\"" "$f" || continue
+    pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f")
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then running=1; break; fi
+  done
+  printf '%s\n' "${C_SHELL}Found it${C_RESET}" ""
+  printf '%s  %s\n' "${C_DIM}Project${C_RESET}" "${cwd##*/}   ${C_DIM}${cwd}${C_RESET}"
+  printf '%s  %s\n' "${C_DIM}Last   ${C_RESET}" "$when"
+  printf '%s  %s\n' "${C_DIM}Asked  ${C_RESET}" "${first:-(no prompt recorded)}"
+  echo
+  if [[ "$running" == 1 ]]; then
+    printf '%s\n' "${C_BUSY}Running now.${C_RESET} Enter jumps to it."
+  else
+    printf '%s\n' "${C_IDLE_ROW}Not running.${C_RESET} Enter resumes it in a tmux session for its project."
+  fi
 }
 
 # forget_session: X on a dormant row removes every slept-list line for its
@@ -1052,6 +1101,11 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "--id-preview" ]]; then
+  id_preview "${2:-}"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--newlabel" ]]; then
   new_label
   exit 0
@@ -1146,22 +1200,36 @@ back_to_list() {
 # i → resume any conversation by its Claude sessionId, even one not listed here.
 # Accepts a pasted command line too: the first UUID in the text is used.
 if [[ "$action" == id ]]; then
-  read -e -r -p "Claude session ID (or paste a line containing one; empty Enter = back): " i_text || back_to_list 130
-  i_sid=$(printf '%s' "$i_text" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true)
-  [[ -n "$i_sid" ]] || back_to_list 130
-  if command -v cproj >/dev/null 2>&1; then
-    cproj resume "$i_sid" || back_to_list $?
-    exit 0
+  i_text=$(printf '%s\n' "  Enter  open this conversation" \
+    | fzf --ansi --disabled --layout=reverse --no-sort --info=hidden \
+        --border=rounded --border-label=" claude-dash · open by session ID " --border-label-pos=2 \
+        --color="fg:-1,bg:-1,hl:${HL},fg+:${FGP},bg+:${BGP},hl+:${HLP},header:${HDR},info:${INFO},pointer:${PTR},prompt:${PROMPT},border:${BORDER},label:${LABEL},gutter:-1" \
+        --pointer='▶' --prompt='session ID ▸ ' \
+        --header=$'Paste a Claude session ID, or a whole line that contains one.\nRunning already? You jump to it. Otherwise it resumes in its project.\nEsc = back to the list' \
+        --preview="\"$SCRIPT_PATH\" --id-preview {q}" \
+        --preview-window=down:55%:wrap:border-top \
+        --bind 'enter:print-query') || back_to_list 130
+  i_sid=$(printf '%s' "$i_text" | grep -oE "$UUID_RE" | head -1 || true)
+  [[ -n "$i_sid" ]] || exec "$SCRIPT_PATH"
+  # Already listed (live or sleeping)? Treat it like Enter on that row.
+  i_row=$(enumerate_sessions status | awk -F'\t' -v s="$i_sid" '$11==s' | head -1 || true)
+  if [[ -n "$i_row" && "$(printf '%s' "$i_row" | cut -f7)" != "-" ]]; then
+    sel="$i_row"; action=""
+  else
+    if [[ -n "$CPROJ" ]]; then
+      "$CPROJ" resume "$i_sid" || back_to_list $?
+      exit 0
+    fi
+    i_tf=$(ls "$PROJECTS_DIR"/*/"$i_sid".jsonl 2>/dev/null | head -1 || true)
+    i_cwd=$([[ -n "$i_tf" ]] && grep -m1 -o '"cwd":"[^"]*"' "$i_tf" | sed 's/^"cwd":"//; s/"$//' || true)
+    [[ -d "$i_cwd" ]] || { echo "no transcript with a usable cwd for $i_sid" >&2; back_to_list 1; }
+    i_name="${i_cwd##*/}-${i_sid:0:6}"
+    tmux has-session -t "=$i_name" 2>/dev/null || {
+      tmux new-session -d -s "$i_name" -c "$i_cwd" -n claude
+      tmux send-keys -t "$i_name:claude" "claude --resume $i_sid" C-m
+    }
+    exec tmux switch-client -t "=$i_name"
   fi
-  i_tf=$(ls "$PROJECTS_DIR"/*/"$i_sid".jsonl 2>/dev/null | head -1 || true)
-  i_cwd=$([[ -n "$i_tf" ]] && grep -m1 -o '"cwd":"[^"]*"' "$i_tf" | sed 's/^"cwd":"//; s/"$//' || true)
-  [[ -d "$i_cwd" ]] || { echo "no transcript with a usable cwd for $i_sid" >&2; back_to_list 1; }
-  i_name="${i_cwd##*/}-${i_sid:0:6}"
-  tmux has-session -t "=$i_name" 2>/dev/null || {
-    tmux new-session -d -s "$i_name" -c "$i_cwd" -n claude
-    tmux send-keys -t "$i_name:claude" "claude --resume $i_sid" C-m
-  }
-  exec tmux switch-client -t "=$i_name"
 fi
 
 jump=$(printf '%s' "$sel" | cut -f7)
@@ -1175,8 +1243,8 @@ if [[ "$action" == pick ]]; then
   case "$jump" in RESUME\|*|NEW\|*|-|'') ;; *) p_name="${jump%%|*}" ;; esac   # live row: its tmux session
   [[ -d "$p_cwd" ]] || { echo "no directory for this row" >&2; exit 0; }
   [[ -n "$p_name" && "$p_name" != -* ]] || p_name="${p_cwd##*/}"
-  if command -v cproj >/dev/null 2>&1; then
-    cproj resume "$p_name" "$p_cwd" || back_to_list $?
+  if [[ -n "$CPROJ" ]]; then
+    "$CPROJ" resume "$p_name" "$p_cwd" || back_to_list $?
     exit 0
   fi
   p_name="${p_name}-pick"
@@ -1193,8 +1261,8 @@ fi
 if [[ "$jump" == NEW\|* ]]; then
   IFS='|' read -r _ n_name n_path <<< "$jump"
   case "$n_name" in ls|kill|resume|cont|rc|restart|killall) echo "reserved project name: $n_name" >&2; exit 0 ;; esac
-  if command -v cproj >/dev/null 2>&1; then
-    exec cproj "$n_name" "$n_path"
+  if [[ -n "$CPROJ" ]]; then
+    exec "$CPROJ" "$n_name" "$n_path"
   fi
   if tmux has-session -t "=$n_name" 2>/dev/null; then
     exec tmux switch-client -t "=$n_name"
@@ -1212,8 +1280,8 @@ if [[ "$jump" == RESUME\|* ]]; then
   IFS='|' read -r _ r_sid r_cwd <<< "$jump"
   r_name=$(printf '%s' "$sel" | cut -f3)   # PROJECT col = original tmux name (if recorded) else cwd basename
   [[ -n "$r_name" ]] || r_name="${r_cwd##*/}"
-  if command -v cproj >/dev/null 2>&1; then
-    exec cproj resume "$r_name" "$r_cwd" "$r_sid"
+  if [[ -n "$CPROJ" ]]; then
+    exec "$CPROJ" resume "$r_name" "$r_cwd" "$r_sid"
   fi
   if tmux has-session -t "$r_name" 2>/dev/null; then r_name="${r_name}-${r_sid:0:6}"; fi
   tmux new-session -d -s "$r_name" -c "$r_cwd" -n claude

@@ -46,7 +46,7 @@ cd claude-tmux-dashboard
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Live row → jump to its tmux pane. Dormant (`z`) row → resume that exact conversation (`claude --resume`), via `cproj resume` if a `cproj` helper is on `PATH` (so it gets cproj's `claude` flags) |
+| `Enter` | Live row → jump to its tmux pane. Dormant (`z`) row → resume that exact conversation (`claude --resume`), via `cproj resume` if a `cproj` helper is found (so it gets cproj's `claude` flags) |
 | `s` | Sort by status (default: waiting → busy → bg-shell → idle, recent first within each) |
 | `c` | Sort by context % (fullest first) |
 | `t` | Sort by last activity (most recent first) |
@@ -55,8 +55,10 @@ cd claude-tmux-dashboard
 | `n` | List projects from a registry file that have no live or dormant row (a session in a subdirectory counts as open). The registry defaults to `~/.config/claude-project/projects.tsv`, override with `CLAUDE_DASH_REGISTRY`; format is one `name<TAB>absolute-path` per line. `Enter` on a `+` row opens the project after the popup closes: via a `cproj` helper if one is on `PATH` (it applies its own `claude` flags), else a plain `tmux new-session` running `claude`. Rows with an unsafe name or path (`|`, tab, leading `-`, a `.` or `:` in the name, relative, or not a directory) are skipped. The border label shows the count or why the list is empty; `r`/`s` return to the session list. |
 | `X` | Forget the selected dormant row for good: removes every line for that session from the slept list. The transcript stays, so `claude --resume <id>` still works. No-op (with a label) on live and new rows. |
 | `R` | Pick a past conversation of the selected row's project and open it in its own tmux session after the popup closes. With a `cproj` helper on `PATH` this runs `cproj resume <name> <dir>` (a picker scoped to that directory); otherwise a new `<name>-pick` session runs `claude --resume` and Claude's own picker. Works on live, dormant and new rows. `Esc` in the picker returns to the list. |
-| `i` | Resume any conversation by its Claude session ID, even one the dashboard doesn't list: type or paste the ID (or a whole command line containing one; the first UUID is used). Goes through `cproj resume <id>` when on `PATH`, otherwise opens a `<dir>-<id6>` tmux session at the transcript's cwd running `claude --resume <id>`. Empty input returns to the list. |
+| `i` | Open any conversation by its Claude session ID, even one the dashboard doesn't list. A screen in the dashboard's style takes the ID, or a whole pasted command line containing one (the first UUID is used), and its preview shows the project, last activity, the last prompt and whether it's running. `Enter`: if that conversation is already in a tmux pane you jump there; otherwise it resumes through `cproj resume <id>` (or a `<dir>-<id6>` tmux session at the transcript's cwd running `claude --resume <id>`). `Esc` returns to the list. |
 | `r` | Refresh |
+
+The optional `cproj` helper is looked up on `PATH`, then in `~/bin` and `~/.local/bin`, because tmux popups run with a bare `PATH`. Set `CLAUDE_DASH_CPROJ` to point at it explicitly.
 
 Because `s`/`c`/`t`/`p`/`n`/`x`/`X`/`R`/`i` are action keys they don't type-to-filter the fzf query — fine for a short list. The key legend at the top **wraps onto extra rows on narrow terminals** instead of truncating.
 
