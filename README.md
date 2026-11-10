@@ -12,7 +12,8 @@ Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-c
  claude-dash · 9 sessions
 ────────────────────────────────────────────────────────────────────────────
  ? wait   > busy   & bg-shell   . idle   z resume   (app) Claude Desktop app
- s status   c ctx%   t time   p proj   n new   x sleep   X forget   r refresh   ↵ jump/resume
+ s status   c ctx%   t time   p proj   n new   x sleep   X forget
+ R past chats   i by id   r refresh   ↵ jump/resume
 
      CTX% MODEL    │ PROJECT              │ TARGET             │ LAST
  > ▁ 14%  Opus 4.8 │ GrapplingTracks      │ daily-porrada:1.1  │ 44s
@@ -26,7 +27,7 @@ Companion to [claude-tmux-continuity](https://github.com/dohgren78/claude-tmux-c
 
 > The status column (`?` `>` `&` `.` `z` above) is shown here as ASCII. **In the terminal these are colour-coded [Nerd Font](https://www.nerdfonts.com/) icons** by default — a spinner for busy, a folder-shell for bg-shell, a dot for idle, and so on — and the CTX% gauge (`▁▃▅▇`) is graded green → amber → red. Without a Nerd Font, set `CLAUDE_DASH_ASCII=1` for exactly the ASCII glyphs above (see [Install](#install)).
 
-Live sessions on top (jump with Enter), parked ones (`z`) below (Enter resumes the exact conversation, `x` sleeps a live one). The status icon, CTX% gauge, and MODEL are colour-coded, and the whole row dims when idle so the active ones stand out.
+Live sessions on top (jump with Enter), parked ones (`z`) below (Enter resumes the exact conversation, `x` sleeps a live one). `R` lists a project's past conversations and `i` opens any conversation by its session ID, so you can get back to work that isn't on the list. The status icon, CTX% gauge, and MODEL are colour-coded, and the whole row dims when idle so the active ones stand out.
 
 ## Install
 
@@ -54,11 +55,20 @@ cd claude-tmux-dashboard
 | `x` | Sleep the selected live session — kills its tmux session to free RAM; the conversation persists and reappears as a dormant `z` row, resumable. The border label confirms the result instantly (`slept: …`). A session with no conversation yet (e.g. just opened with `n`) is closed instead: there is nothing to resume, so it gets no `z` row and goes back to the `n` list (`closed: …`). No-op (with an explanatory label) on dormant rows, unmapped rows, and the dashboard's own session. |
 | `n` | List projects from a registry file that have no live or dormant row (a session in a subdirectory counts as open). The registry defaults to `~/.config/claude-project/projects.tsv`, override with `CLAUDE_DASH_REGISTRY`; format is one `name<TAB>absolute-path` per line. `Enter` on a `+` row opens the project after the popup closes: via a `cproj` helper if one is on `PATH` (it applies its own `claude` flags), else a plain `tmux new-session` running `claude`. Rows with an unsafe name or path (`|`, tab, leading `-`, a `.` or `:` in the name, relative, or not a directory) are skipped. The border label shows the count or why the list is empty; `r`/`s` return to the session list. |
 | `X` | Forget the selected dormant row for good: removes every line for that session from the slept list. The transcript stays, so `claude --resume <id>` still works. No-op (with a label) on live and new rows. |
-| `R` | Pick a past conversation of the selected row's project and open it in its own tmux session after the popup closes. With a `cproj` helper on `PATH` this runs `cproj resume <name> <dir>` (a picker scoped to that directory); otherwise a new `<name>-pick` session runs `claude --resume` and Claude's own picker. Works on live, dormant and new rows. `Esc` in the picker returns to the list. |
+| `R` (Shift+r) | Pick a past conversation of the selected row's project and open it in its own tmux session after the popup closes. With a `cproj` helper this runs `cproj resume <name> <dir>` (a picker scoped to that directory); otherwise a new `<name>-pick` session runs `claude --resume` and Claude's own picker. Works on live, dormant and new rows. `Esc` in the picker returns to the list. |
 | `i` | Open any conversation by its Claude session ID, even one the dashboard doesn't list. A screen in the dashboard's style takes the ID, or a whole pasted command line containing one (the first UUID is used), and its preview shows the project, last activity, the last prompt and whether it's running. `Enter`: if that conversation is already in a tmux pane you jump there; otherwise it resumes through `cproj resume <id>` (or a `<dir>-<id6>` tmux session at the transcript's cwd running `claude --resume <id>`). `Esc` returns to the list. |
 | `r` | Refresh |
 
-The optional `cproj` helper is looked up on `PATH`, then in `~/bin` and `~/.local/bin`, because tmux popups run with a bare `PATH`. Set `CLAUDE_DASH_CPROJ` to point at it explicitly.
+**Optional `cproj` helper.** Nothing here requires it: without one, every action uses plain `tmux` plus `claude` / `claude --resume`. If you keep your own per-project launcher (for example one that always adds your preferred `claude` flags), name it `cproj` and the dashboard hands these actions to it:
+
+| Dashboard action | Call |
+|---|---|
+| `n` → `Enter` | `cproj <name> <dir>` |
+| Dormant row → `Enter` | `cproj resume <name> <dir> <sessionId>` |
+| `R` | `cproj resume <name> <dir>` (expected to show its own picker) |
+| `i` | `cproj resume <sessionId>` |
+
+An exit status of `130` from the helper (cancelled picker) returns you to the list. It is looked up on `PATH`, then in `~/bin` and `~/.local/bin`, because tmux popups run with a bare `PATH`; set `CLAUDE_DASH_CPROJ` to point at it explicitly.
 
 Because `s`/`c`/`t`/`p`/`n`/`x`/`X`/`R`/`i` are action keys they don't type-to-filter the fzf query — fine for a short list. The key legend at the top **wraps onto extra rows on narrow terminals** instead of truncating.
 
@@ -107,7 +117,7 @@ It reports the detected Claude Code version (and the version the assumptions wer
 
 ## Read-only
 
-The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit `Enter` actions — **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** for a dormant row — `n` (opens a registry project after `Enter`, same spawn path as resume), `x`, which sleeps a live session by killing its tmux session (the conversation persists), and `X`, which rewrites only the dashboard's own slept list and never touches transcripts. `--doctor`, `--list`, and `--preview` are pure reads.
+The script never writes Claude session state and never touches tmux session-persistence tooling (resurrect / continuum / restore). The only mutations are the explicit `Enter` actions — **jump** (`select-window` / `select-pane` / `switch-client`) for a live row, or **resume** for a dormant row — `n` (opens a registry project after `Enter`, same spawn path as resume), `R` and `i` (open the chosen conversation in a tmux session, or jump to it if it is already running), `x`, which sleeps a live session by killing its tmux session (the conversation persists), and `X`, which rewrites only the dashboard's own slept list and never touches transcripts. `--doctor`, `--list`, `--preview`, and `--id-preview` are pure reads.
 
 ## Compatibility & assumptions
 
@@ -119,7 +129,7 @@ The script never writes Claude session state and never touches tmux session-pers
 
 The dashboard is stateless except for one file: **`~/.claude/.claude-dash-slept`** — appended each time you sleep a session with `x`, one line per sleep (`<sessionId>\t<tmux-name>\t<cwd>`). The dormant `z` list is built entirely from it (entries that aren't currently live and still have a transcript; newest name per `sessionId` wins).
 
-- **Forget one row:** press `X` on a dormant row. It rewrites the slept list without that session (temp file + rename, serialised against `x` by a `.claude-dash-slept.lock` directory); `X` is the per-row alternative to `rm`.
+- **Forget one row:** press `X` on a dormant row. It rewrites the slept list without that session (temp file + rename, serialised against `x` by a `.claude-dash-slept.lock` directory); `X` is the per-row alternative to `rm`. The conversation itself stays: reopen it later with `R` on that project or `i` with its session ID.
 - **Clear the slept list:** `rm ~/.claude/.claude-dash-slept`. (Conversations are untouched — this tool never deletes transcripts.)
 - **Rebuild it after data loss:** the conversations live on as transcripts, so you can reconstruct one resumable entry per project (most-recent non-live transcript):
 
