@@ -1033,6 +1033,7 @@ build_header() {
   GROUP_VIS+=("x sleep");       GROUP_REND+=("${C_DIM}x sleep${C_RESET}")
   GROUP_VIS+=("X forget");      GROUP_REND+=("${C_DIM}X forget${C_RESET}")
   GROUP_VIS+=("R past chats");  GROUP_REND+=("${C_DIM}R past chats${C_RESET}")
+  GROUP_VIS+=("i by id");       GROUP_REND+=("${C_DIM}i by id${C_RESET}")
   GROUP_VIS+=("r refresh");     GROUP_REND+=("${C_DIM}r refresh${C_RESET}")
   GROUP_VIS+=("⏎ jump/resume"); GROUP_REND+=("${C_DIM}⏎ jump/resume${C_RESET}")
   local key_lines
@@ -1124,14 +1125,44 @@ sel=$(
         --bind "n:transform-border-label(\"$SCRIPT_PATH\" --newlabel)+reload(\"$SCRIPT_PATH\" --list new)" \
         --bind "x:transform-border-label(\"$SCRIPT_PATH\" --kill {})+reload(\"$SCRIPT_PATH\" --list status)" \
         --bind "X:transform-border-label(\"$SCRIPT_PATH\" --forget {})+reload(\"$SCRIPT_PATH\" --list status)" \
-        --bind "R:print(PICK)+accept"
+        --bind "R:print(PICK)+accept" \
+        --bind "i:print(ID)+accept-or-print-query"
 ) || exit 0
 
 [[ -z "$sel" ]] && exit 0
 
-# R prints PICK before the row: pick one of that project's past conversations.
+# R / i print PICK / ID before the row (see their binds).
 action=""
 if [[ "$sel" == PICK$'\n'* ]]; then action=pick; sel="${sel#PICK$'\n'}"; fi
+if [[ "$sel" == ID$'\n'* || "$sel" == ID ]]; then action=id; sel="${sel#ID}"; sel="${sel#$'\n'}"; fi
+
+# A cancelled follow-up (exit 130: Esc in a picker or prompt) reopens the list
+# instead of closing the popup. Any other failure keeps its message on screen.
+back_to_list() {
+  if [[ "$1" != 130 ]]; then read -rsn1 -p "press any key to return to the list " _; fi
+  exec "$SCRIPT_PATH"
+}
+
+# i → resume any conversation by its Claude sessionId, even one not listed here.
+# Accepts a pasted command line too: the first UUID in the text is used.
+if [[ "$action" == id ]]; then
+  read -e -r -p "Claude session ID (or paste a line containing one; empty Enter = back): " i_text || back_to_list 130
+  i_sid=$(printf '%s' "$i_text" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true)
+  [[ -n "$i_sid" ]] || back_to_list 130
+  if command -v cproj >/dev/null 2>&1; then
+    cproj resume "$i_sid" || back_to_list $?
+    exit 0
+  fi
+  i_tf=$(ls "$PROJECTS_DIR"/*/"$i_sid".jsonl 2>/dev/null | head -1 || true)
+  i_cwd=$([[ -n "$i_tf" ]] && grep -m1 -o '"cwd":"[^"]*"' "$i_tf" | sed 's/^"cwd":"//; s/"$//' || true)
+  [[ -d "$i_cwd" ]] || { echo "no transcript with a usable cwd for $i_sid" >&2; back_to_list 1; }
+  i_name="${i_cwd##*/}-${i_sid:0:6}"
+  tmux has-session -t "=$i_name" 2>/dev/null || {
+    tmux new-session -d -s "$i_name" -c "$i_cwd" -n claude
+    tmux send-keys -t "$i_name:claude" "claude --resume $i_sid" C-m
+  }
+  exec tmux switch-client -t "=$i_name"
+fi
 
 jump=$(printf '%s' "$sel" | cut -f7)
 
@@ -1145,7 +1176,8 @@ if [[ "$action" == pick ]]; then
   [[ -d "$p_cwd" ]] || { echo "no directory for this row" >&2; exit 0; }
   [[ -n "$p_name" && "$p_name" != -* ]] || p_name="${p_cwd##*/}"
   if command -v cproj >/dev/null 2>&1; then
-    exec cproj resume "$p_name" "$p_cwd"
+    cproj resume "$p_name" "$p_cwd" || back_to_list $?
+    exit 0
   fi
   p_name="${p_name}-pick"
   tmux has-session -t "=$p_name" 2>/dev/null || {
