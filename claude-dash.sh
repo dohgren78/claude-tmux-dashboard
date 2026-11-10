@@ -1032,6 +1032,7 @@ build_header() {
   GROUP_VIS+=("n new");         GROUP_REND+=("${C_DIM}n new${C_RESET}")
   GROUP_VIS+=("x sleep");       GROUP_REND+=("${C_DIM}x sleep${C_RESET}")
   GROUP_VIS+=("X forget");      GROUP_REND+=("${C_DIM}X forget${C_RESET}")
+  GROUP_VIS+=("R past chats");  GROUP_REND+=("${C_DIM}R past chats${C_RESET}")
   GROUP_VIS+=("r refresh");     GROUP_REND+=("${C_DIM}r refresh${C_RESET}")
   GROUP_VIS+=("⏎ jump/resume"); GROUP_REND+=("${C_DIM}⏎ jump/resume${C_RESET}")
   local key_lines
@@ -1122,19 +1123,44 @@ sel=$(
         --bind "p:reload(\"$SCRIPT_PATH\" --list project)" \
         --bind "n:transform-border-label(\"$SCRIPT_PATH\" --newlabel)+reload(\"$SCRIPT_PATH\" --list new)" \
         --bind "x:transform-border-label(\"$SCRIPT_PATH\" --kill {})+reload(\"$SCRIPT_PATH\" --list status)" \
-        --bind "X:transform-border-label(\"$SCRIPT_PATH\" --forget {})+reload(\"$SCRIPT_PATH\" --list status)"
+        --bind "X:transform-border-label(\"$SCRIPT_PATH\" --forget {})+reload(\"$SCRIPT_PATH\" --list status)" \
+        --bind "R:print(PICK)+accept"
 ) || exit 0
 
 [[ -z "$sel" ]] && exit 0
 
+# R prints PICK before the row: pick one of that project's past conversations.
+action=""
+if [[ "$sel" == PICK$'\n'* ]]; then action=pick; sel="${sel#PICK$'\n'}"; fi
+
 jump=$(printf '%s' "$sel" | cut -f7)
+
+# R → choose a past conversation of the selected row's project and open it in its
+# own tmux session. cproj (when on PATH) shows a picker scoped to that directory and
+# applies its claude flags; otherwise claude's own --resume picker.
+if [[ "$action" == pick ]]; then
+  p_cwd=$(printf '%s' "$sel" | cut -f10)
+  p_name=$(printf '%s' "$sel" | cut -f3)
+  case "$jump" in RESUME\|*|NEW\|*|-|'') ;; *) p_name="${jump%%|*}" ;; esac   # live row: its tmux session
+  [[ -d "$p_cwd" ]] || { echo "no directory for this row" >&2; exit 0; }
+  [[ -n "$p_name" && "$p_name" != -* ]] || p_name="${p_cwd##*/}"
+  if command -v cproj >/dev/null 2>&1; then
+    exec cproj resume "$p_name" "$p_cwd"
+  fi
+  p_name="${p_name}-pick"
+  tmux has-session -t "=$p_name" 2>/dev/null || {
+    tmux new-session -d -s "$p_name" -c "$p_cwd" -n claude
+    tmux send-keys -t "$p_name:claude" "claude --resume" C-m
+  }
+  exec tmux switch-client -t "=$p_name"
+fi
 
 # NEW row (n bind) → open the registry project now that fzf has exited. cproj
 # (when on PATH) applies its own claude flags; otherwise plain tmux. Name and
 # path are only ever passed as quoted argv; send-keys sends the literal "claude".
 if [[ "$jump" == NEW\|* ]]; then
   IFS='|' read -r _ n_name n_path <<< "$jump"
-  case "$n_name" in ls|kill|resume|cont|killall) echo "reserved project name: $n_name" >&2; exit 0 ;; esac
+  case "$n_name" in ls|kill|resume|cont|rc|restart|killall) echo "reserved project name: $n_name" >&2; exit 0 ;; esac
   if command -v cproj >/dev/null 2>&1; then
     exec cproj "$n_name" "$n_path"
   fi
@@ -1148,10 +1174,15 @@ fi
 
 # Dormant row → resume THIS exact conversation (claude --resume <sessionId>) in a
 # fresh tmux session at its cwd. Never --continue (which grabs the cwd's most-recent).
+# cproj (when on PATH) applies its claude flags and opens a <name>-<id6> session
+# if <name> is busy with something else.
 if [[ "$jump" == RESUME\|* ]]; then
   IFS='|' read -r _ r_sid r_cwd <<< "$jump"
   r_name=$(printf '%s' "$sel" | cut -f3)   # PROJECT col = original tmux name (if recorded) else cwd basename
   [[ -n "$r_name" ]] || r_name="${r_cwd##*/}"
+  if command -v cproj >/dev/null 2>&1; then
+    exec cproj resume "$r_name" "$r_cwd" "$r_sid"
+  fi
   if tmux has-session -t "$r_name" 2>/dev/null; then r_name="${r_name}-${r_sid:0:6}"; fi
   tmux new-session -d -s "$r_name" -c "$r_cwd" -n claude
   tmux send-keys -t "$r_name:claude" "claude --resume $r_sid" C-m
